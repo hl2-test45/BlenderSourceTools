@@ -1,0 +1,5 @@
+# for devs, have the stubs for python
+fake-bpy-module-5.2
+
+# direct blender tool, for the tests
+bpy

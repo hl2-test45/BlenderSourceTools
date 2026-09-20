@@ -19,7 +19,7 @@
 # ##### END GPL LICENSE BLOCK #####
 
 bl_info = {
-	"name": "Blender Source Tools",
+	"name": "[MOD] Blender Source Tools",
 	"author": "Tom Edwards",
 	"version": (3, 4, 3),
 	"blender": (4, 1, 0),
