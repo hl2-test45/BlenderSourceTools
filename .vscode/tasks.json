@@ -1,0 +1,82 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Sync to Blender",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/scripts/sync_to_blender.ps1"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Sync to Blender (symlink)",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/scripts/sync_to_blender.ps1",
+                "-Symlink"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Build Release Zip",
+            "type": "shell",
+            "command": "python",
+            "args": ["make_zip.py"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Install debugpy into Blender",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/scripts/install_debugpy.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            // Used as the preLaunchTask of "Blender: Launch & Attach". It stays
+            // running for as long as Blender does, so it is declared as a
+            // background task: VS Code stops waiting and attaches the debugger
+            // once the listener prints its "listening on" line.
+            "label": "Blender: Launch with debug listener",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}/scripts/launch_blender_debug.ps1"
+            ],
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": {
+                "owner": "blender-debug",
+                "pattern": {
+                    "regexp": "^(?!a)a$"
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^Blender debug launcher: starting",
+                    "endsPattern": "^BST debugpy: listening on"
+                }
+            }
+        }
+    ]
+}

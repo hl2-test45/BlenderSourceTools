@@ -278,6 +278,12 @@ SMD_OT_CreateVertexMap_idname = "smd.vertex_map_create_"
 SMD_OT_SelectVertexMap_idname = "smd.vertex_map_select_"
 SMD_OT_RemoveVertexMap_idname = "smd.vertex_map_remove_"
 
+# One Select/Create/Remove operator per vertex map. They are generated here but
+# registered by __init__.register() along with everything else, so that
+# unregister() can remove them again (needed for Reload Scripts and for
+# disabling the add-on cleanly).
+vertex_map_classes = []
+
 for map_name in vertex_maps:
 	def is_mesh(ob):
 		return ob is not None and ob.type == 'MESH'
@@ -330,9 +336,7 @@ for map_name in vertex_maps:
 			vcs.remove(vcs[self.vertex_map])
 			return {'FINISHED'}
 
-	bpy.utils.register_class(SelectVertexMap)
-	bpy.utils.register_class(CreateVertexMap)
-	bpy.utils.register_class(RemoveVertexMap)
+	vertex_map_classes.extend((SelectVertexMap, CreateVertexMap, RemoveVertexMap))
 
 class SMD_PT_Object_Config(bpy.types.Panel):
 	bl_label = get_id('exportables_title')

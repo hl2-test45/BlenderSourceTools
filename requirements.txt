@@ -3,3 +3,7 @@ fake-bpy-module-5.2
 
 # direct blender tool, for the tests
 bpy
+
+# NOTE: debugpy is deliberately not listed here. It must be installed into
+# Blender's own Python, not this venv -- see scripts/install_debugpy.ps1 and
+# the "Debugging in VS Code" section of README.md.

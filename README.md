@@ -39,7 +39,61 @@ It auto-detects the newest version under `%APPDATA%\Blender Foundation\Blender\<
 
 If you're using VS Code, the same script is wired up as tasks (**Terminal > Run Task**): *Sync to Blender*, *Sync to Blender (symlink)*, and *Build Release Zip*.
 
+For active development you may not need this at all: the debugging setup below runs the add-on directly from this repository, no deployment step involved.
+
 After syncing, enable the add-on once in Preferences > Add-ons, then use **F8 (Reload Scripts)** in Blender to pick up further changes without restarting.
+
+## Debugging in VS Code
+
+You can set breakpoints in `io_scene_valvesource/*.py` and have them hit while Blender runs the add-on: importing a QC, exporting a mesh, drawing a panel. Blender opens a [debugpy](https://github.com/microsoft/debugpy) listener on startup and VS Code attaches to it over a local socket.
+
+### One-time setup
+
+1. Install the VS Code **Python** and **Python Debugger** extensions.
+2. Install debugpy into Blender's Python (*not* into `.venv` — the debugger has to live in the interpreter that actually executes the add-on, and Blender ships its own):
+
+   ```powershell
+   .\scripts\install_debugpy.ps1
+   ```
+
+   It installs into `%APPDATA%\Blender Foundation\Blender\<version>\scripts\modules`, which Blender puts on `sys.path` at startup. That needs no administrator rights and leaves the Blender installation untouched. `-System` installs into Blender's own `site-packages` instead (elevated prompt required), and `-BlenderVersion` / `-BlenderPython` target a specific install. The same thing is wired up as the *Install debugpy into Blender* task.
+
+That's it. If the add-on is also installed and enabled in Blender the usual way (zip or *Sync to Blender*), leave it that way: the debug launcher unloads that copy and swaps in the repository version **for the debug session only**. Your preferences are not modified, so the next time you start Blender normally you get the installed copy back as before.
+
+### Debugging
+
+Press **F5** and pick **Blender: Launch & Attach**. That runs `scripts/launch_blender_debug.ps1`, which:
+
+- starts Blender with `--python scripts/blender_debug_listen.py`,
+- opens the debug port (5678 by default) and waits up to 10 seconds for VS Code to attach, so breakpoints in module-level code and `register()` are hit too,
+- enables `io_scene_valvesource` **straight from this repository**.
+
+That last point is what makes breakpoints work with no extra configuration: Blender executes the very files you have open, so their paths match and the debugger binds to them directly. It also means `dev_defaults.json` and any edit you make are picked up without running *Sync to Blender* at all.
+
+Blender's console output is streamed into the VS Code task terminal, so `print()` and tracebacks show up there.
+
+To pick up code changes without restarting Blender, use **F8 (Reload Scripts)**. The debugger stays attached and breakpoints rebind to the reloaded modules.
+
+### The other launch configurations
+
+| Configuration | When to use it |
+| --- | --- |
+| **Blender: Launch & Attach** | The usual one. Starts Blender for you and attaches. |
+| **Blender: Attach to running instance** | A Blender you started yourself. Open `scripts/blender_debug_listen.py` in its Text Editor (Text > Open) and press Run Script, then attach. Use this if the launch task ever fails to hand over. |
+| **Blender: Attach (installed copy)** | Debug the copy deployed by *Sync to Blender* rather than the repository. Launch with `.\scripts\launch_blender_debug.ps1 -Installed`. Because Blender reports the add-ons folder path, this configuration maps it back to the repository via `pathMappings` — **update the Blender version in that path** to match your install. |
+| **Python: Unit tests** | Unrelated to Blender-the-application: debugs the tests below against the `bpy` pip module. |
+
+### Options and troubleshooting
+
+`scripts/launch_blender_debug.ps1` takes `-Port` (match it in `launch.json`), `-BlendFile` to open a scene on startup, `-BlenderVersion` / `-BlenderExe` to pick an install, `-NoWait` to skip the attach wait, and forwards anything else to Blender.
+
+- **"debugpy is not importable from Blender's Python"** — step 2 above was skipped, or it installed for a different Blender version than the one being launched. Pass the same `-BlenderVersion` to both scripts.
+- **Breakpoints show as hollow / "not verified"** — Blender is running a different copy of the file than the one you set the breakpoint in. Check the `add-on running from ...` line in the task terminal; it should point at this repository.
+- **F5 hangs on "Blender: Launch with debug listener"** — VS Code is waiting for the listener's startup line and never saw it. Look at the task terminal for the real error, then fall back to *Blender: Attach to running instance*.
+- **Port already in use** — a previous Blender is still running, or still holding the socket. Close it, or use a different `-Port`.
+- **A burst of `has been registered before, unregistering previous` messages at startup** — the copy installed in Blender predates the fix that lets the add-on unregister completely (vertex-map operators used to be registered on import). Harmless, but run *Sync to Blender* once to update the installed copy and it goes away.
+
+> `.vscode/` is gitignored in this repository, so `launch.json` and `tasks.json` are local to your checkout and won't come along with a fresh clone.
 
 ## Repository layout
 
@@ -56,6 +110,15 @@ io_scene_valvesource/   the add-on itself (this folder is what gets zipped/insta
 Tests/                   unit tests, run against Blender-as-a-Python-module
 scripts/
   sync_to_blender.ps1      deploys io_scene_valvesource/ into a local Blender install
+  set_dev_defaults.ps1     writes machine-specific Engine/Game Path defaults (gitignored)
+  install_debugpy.ps1      installs debugpy into Blender's Python, for VS Code debugging
+  launch_blender_debug.ps1 starts Blender with the debug listener open
+  blender_debug_listen.py  runs inside Blender: opens the debug port, loads the add-on
+                           from this repository
+  blender_paths.ps1        shared helper that locates an installed Blender
+.vscode/
+  launch.json              VS Code debug configurations (gitignored, see above)
+  tasks.json               sync / build / debug tasks (gitignored)
 make_zip.py              builds a versioned release zip from io_scene_valvesource/
 pyrightconfig.json       Pylance/Pyright settings (bpy's dynamic typing needs some checks disabled)
 requirements.txt         dev-only deps: bpy stubs for the language server, bpy itself for tests

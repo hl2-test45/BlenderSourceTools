@@ -49,6 +49,17 @@ for collection in [bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load
 from . import datamodel, import_smd, export_smd, flex, GUI, update
 from .utils import *
 
+def _load_dev_defaults():
+	import json
+	path = os.path.join(os.path.dirname(os.path.realpath(__file__)),"dev_defaults.json")
+	try:
+		with open(path,"r",encoding="utf-8-sig") as f:
+			return json.load(f)
+	except (OSError,ValueError) as e:
+		return {}
+
+_dev_defaults = _load_dev_defaults()
+
 class ValveSource_Exportable(bpy.types.PropertyGroup):
 	ob_type : StringProperty()
 	icon : StringProperty()
@@ -107,7 +118,7 @@ class ValveSource_SceneProps(PropertyGroup):
 	export_path : StringProperty(name=get_id("exportroot"),description=get_id("exportroot_tip"), subtype='DIR_PATH', options=_relativePathOptions)
 	qc_compile : BoolProperty(name=get_id("qc_compileall"),description=get_id("qc_compileall_tip"),default=False)
 	qc_path : StringProperty(name=get_id("qc_path"),description=get_id("qc_path_tip"),default="//*.qc",subtype="FILE_PATH", options=_relativePathOptions)
-	engine_path : StringProperty(name=get_id("engine_path"),description=get_id("engine_path_tip"), subtype='DIR_PATH',update=State.onEnginePathChanged)
+	engine_path : StringProperty(name=get_id("engine_path"),description=get_id("engine_path_tip"), subtype='DIR_PATH',default=_dev_defaults.get("engine_path",""),update=State.onEnginePathChanged)
 	
 	dmx_encoding : EnumProperty(name=get_id("dmx_encoding"),description=get_id("dmx_encoding_tip"),items=tuple(encodings),default='2')
 	dmx_format : EnumProperty(name=get_id("dmx_format"),description=get_id("dmx_format_tip"),items=tuple(formats),default='1')
@@ -118,7 +129,7 @@ class ValveSource_SceneProps(PropertyGroup):
 	export_list_active : IntProperty(name=get_id("active_exportable"),default=0,min=0,update=export_active_changed)
 	export_list : CollectionProperty(type=ValveSource_Exportable,options={'SKIP_SAVE','HIDDEN'})
 	use_kv2 : BoolProperty(name="Write KeyValues2",description="Write ASCII DMX files",default=False)
-	game_path : StringProperty(name=get_id("game_path"),description=get_id("game_path_tip"),subtype='DIR_PATH',update=State.onGamePathChanged)
+	game_path : StringProperty(name=get_id("game_path"),description=get_id("game_path_tip"),subtype='DIR_PATH',default=_dev_defaults.get("game_path",""),update=State.onGamePathChanged)
 	dmx_weightlink_threshold : FloatProperty(name=get_id("dmx_weightlinkcull"),description=get_id("dmx_weightlinkcull_tip"),max=1,min=0)
 	smd_format : EnumProperty(name=get_id("smd_format"), items=(('SOURCE', "Source", "Source Engine (Half-Life 2)") , ("GOLDSOURCE", "GoldSrc", "GoldSrc engine (Half-Life 1)")), default="SOURCE")
 
@@ -213,6 +224,7 @@ _classes = (
 	GUI.SMD_PT_Armature,
 	GUI.SMD_PT_ShapeKeys,
 	GUI.SMD_PT_VertexMaps,
+	*GUI.vertex_map_classes,
 	GUI.SMD_PT_Curves,
 	GUI.SMD_PT_Scene_QC_Complie,
 	flex.DmxWriteFlexControllers,
@@ -254,6 +266,12 @@ def register():
 	bpy.types.Text.vs = make_pointer(ValveSource_TextProps)
 
 	State.hook_events()
+
+	# validate RNA defaults later, once a real context is available.
+	def _validate_initial_state():
+		State._onLoad(None)
+		return None
+	bpy.app.timers.register(_validate_initial_state)
 
 def unregister():
 	State.unhook_events()

@@ -1,0 +1,57 @@
+{
+    // Debugging the add-on while Blender runs it. See the "Debugging in VS Code"
+    // section of README.md. Requires the Python + Python Debugger extensions,
+    // and debugpy inside Blender's Python (scripts/install_debugpy.ps1).
+    "version": "0.2.0",
+    "configurations": [
+        {
+            // The usual one: starts Blender with the listener open, then attaches.
+            // The add-on is loaded straight out of this repository, so breakpoints
+            // in io_scene_valvesource/*.py bind with no path mapping.
+            "name": "Blender: Launch & Attach",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "127.0.0.1", "port": 5678 },
+            "preLaunchTask": "Blender: Launch with debug listener",
+            "justMyCode": true
+        },
+        {
+            // For a Blender you started yourself, after running
+            // scripts/blender_debug_listen.py in its Text Editor.
+            "name": "Blender: Attach to running instance",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "127.0.0.1", "port": 5678 },
+            "justMyCode": true
+        },
+        {
+            // For debugging the copy deployed by the "Sync to Blender" task
+            // instead of the repository itself (launch with -Installed). Blender
+            // reports the add-ons folder path, so map it back to the repository.
+            // Update the version number below to match your Blender.
+            "name": "Blender: Attach (installed copy)",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": { "host": "127.0.0.1", "port": 5678 },
+            "pathMappings": [
+                {
+                    "localRoot": "${workspaceFolder}/io_scene_valvesource",
+                    "remoteRoot": "${env:APPDATA}/Blender Foundation/Blender/5.2/scripts/addons/io_scene_valvesource"
+                }
+            ],
+            "justMyCode": true
+        },
+        {
+            // Unrelated to Blender-the-application: debugs the unit tests, which
+            // run against the bpy pip module in .venv.
+            "name": "Python: Unit tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "unittest",
+            "args": ["discover", "-s", "Tests"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
+    ]
+}
