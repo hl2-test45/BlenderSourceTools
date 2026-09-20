@@ -23,6 +23,7 @@ from .utils import *
 from .export_smd import SmdExporter, SMD_OT_Compile
 from .update import SmdToolsUpdate # comment this line if you make third-party changes
 from .flex import *
+from .link_vmt import SMD_OT_LinkVmtTextures
 
 vca_icon = 'EDITMODE_HLT'
 
@@ -110,6 +111,8 @@ class SMD_PT_Scene(bpy.types.Panel):
 			row = l.split(factor=0.33)
 			row.label(text=get_id("smd_format") + ":")
 			row.row().prop(scene.vs,"smd_format", expand=True)
+		
+		l.operator(SMD_OT_LinkVmtTextures.bl_idname,icon='TEXTURE')
 		
 		col = l.column(align=True)
 		row = col.row(align=True)

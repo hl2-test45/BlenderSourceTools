@@ -944,6 +944,7 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 		file = open(filepath, 'r')
 		in_bodygroup = in_lod = in_sequence = False
+		seq_has_file = False # the current $sequence/$animation block already referenced its animation file
 		lod = 0
 		for line_str in file:
 			line = self.parseQuoteBlockedLine(line_str)
@@ -984,6 +985,12 @@ class SmdImporter(bpy.types.Operator, Logger):
 					qc.dir_stack.pop()
 				except IndexError:
 					pass # invalid QC, but whatever
+				continue
+
+			# remember where the model's materials live, for Link VMT Textures
+			if line[0] == "$cdmaterials" and len(line) > 1:
+				from .link_vmt import add_cdmaterial
+				add_cdmaterial(bpy.context.scene, line[1])
 				continue
 
 			# up axis
@@ -1039,6 +1046,14 @@ class SmdImporter(bpy.types.Operator, Logger):
 			# skeletal animations
 			if in_sequence or (doAnim and line[0] in ["$sequence","$animation"]):
 				# there is no easy way to determine whether a SMD is being defined here or elsewhere, or even precisely where it is being defined
+				if not in_sequence:
+					seq_has_file = False
+				elif seq_has_file:
+					# multi-line block (as written by Crowbar): the file came first, everything
+					# after it (fps, loop, event, ikrule...) is option keywords until the block closes
+					if "}" in line:
+						in_sequence = False
+					continue
 				num_words_to_skip = 2 if not in_sequence else 0
 				for i in range(len(line)):
 					if num_words_to_skip:
@@ -1077,8 +1092,9 @@ class SmdImporter(bpy.types.Operator, Logger):
 						import_file(i,"smd",ANIM,'VALIDATE')
 						if line[0] == "$animation":
 							qc.animation_names.append(line[1].lower())
-						while i < len(line) - 1:
-							i += 1
+					seq_has_file = True
+					if "}" in line[i+1:]:
+						in_sequence = False
 					break
 				continue
 

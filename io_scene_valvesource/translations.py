@@ -830,6 +830,66 @@ _data = {
 'update_alreadylatest': {
 	'en': "The latest Source Tools ({0}) are already installed.",
 },
+'link_vmt_title': {
+	'en': "Link VMT Textures",
+},
+'link_vmt_menuitem': {
+	'en': "Source Engine Textures (.vmt)",
+},
+'link_vmt_tip': {
+	'en': "Resolve each material's name through the game's VMT and load its $basetexture (PNG/TGA conversion of the VTF) into the material",
+},
+'vmt_game_root': {
+	'en': "Game Content",
+},
+'vmt_game_root_tip': {
+	'en': "The game's .vmt files (e.g. an extraction of the VPKs): the folder containing materials/, materials/ itself, or materials/models. Defaults to Game Path",
+},
+'vmt_png_root': {
+	'en': "Converted Textures",
+},
+'vmt_png_root_tip': {
+	'en': "The .vtf files converted to PNG/TGA, keeping their folder structure: the folder containing materials/, materials/ itself, or materials/models. Leave empty if they were converted in place",
+},
+'vmt_cdmaterials': {
+	'en': "$cdmaterials",
+},
+'vmt_cdmaterials_tip': {
+	'en': "Folders under materials/ to look up VMTs in, separated by semicolons. Filled in automatically when importing a QC. Leave empty to search all of materials/models by name",
+},
+'link_vmt_selected': {
+	'en': "Selected Objects Only",
+},
+'link_vmt_selected_tip': {
+	'en': "Only process materials used by the selected objects",
+},
+'link_vmt_overwrite': {
+	'en': "Overwrite",
+},
+'link_vmt_overwrite_tip': {
+	'en': "Rebuild materials that already have an Image Texture node",
+},
+'link_vmt_bumpmap': {
+	'en': "Link $bumpmap",
+},
+'link_vmt_bumpmap_tip': {
+	'en': "Also connect $bumpmap through a Normal Map node",
+},
+'link_vmt_err_folder': {
+	'en': "Folder not found: \"{0}\"",
+},
+'link_vmt_warn_novmt': {
+	'en': "{0}: VMT not found",
+},
+'link_vmt_warn_nobase': {
+	'en': "{0}: {1} has no $basetexture (shader {2})",
+},
+'link_vmt_warn_nopng': {
+	'en': "{0}: no PNG/TGA found for {1}",
+},
+'link_vmt_report': {
+	'en': "Linked textures to {0} materials, {1} already textured",
+},
 }
 
 def _get_ids() -> dict[str,str]:	

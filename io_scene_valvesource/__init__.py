@@ -46,7 +46,7 @@ for collection in [bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load
 		if func.__module__.startswith(__name__):
 			collection.remove(func)
 
-from . import datamodel, import_smd, export_smd, flex, GUI, update
+from . import datamodel, import_smd, export_smd, flex, GUI, update, link_vmt
 from .utils import *
 
 def _load_dev_defaults():
@@ -74,6 +74,9 @@ class ValveSource_Exportable(bpy.types.PropertyGroup):
 
 def menu_func_import(self, context):
 	self.layout.operator(import_smd.SmdImporter.bl_idname, text=get_id("import_menuitem", True))
+
+def menu_func_import_textures(self, context):
+	self.layout.operator(link_vmt.SMD_OT_LinkVmtTextures.bl_idname, text=get_id("link_vmt_menuitem", True))
 
 def menu_func_export(self, context):
 	self.layout.menu("SMD_MT_ExportChoice", text=get_id("export_menuitem"))
@@ -115,7 +118,7 @@ formats.sort(key = lambda f: f[0])
 _relativePathOptions = {'PATH_SUPPORTS_BLEND_RELATIVE'} if bpy.app.version >= (4,5,0) else set()
 
 class ValveSource_SceneProps(PropertyGroup):
-	export_path : StringProperty(name=get_id("exportroot"),description=get_id("exportroot_tip"), subtype='DIR_PATH', options=_relativePathOptions)
+	export_path : StringProperty(name=get_id("exportroot"),description=get_id("exportroot_tip"), subtype='DIR_PATH', default=_dev_defaults.get("export_path",""), options=_relativePathOptions)
 	qc_compile : BoolProperty(name=get_id("qc_compileall"),description=get_id("qc_compileall_tip"),default=False)
 	qc_path : StringProperty(name=get_id("qc_path"),description=get_id("qc_path_tip"),default="//*.qc",subtype="FILE_PATH", options=_relativePathOptions)
 	engine_path : StringProperty(name=get_id("engine_path"),description=get_id("engine_path_tip"), subtype='DIR_PATH',default=_dev_defaults.get("engine_path",""),update=State.onEnginePathChanged)
@@ -125,13 +128,18 @@ class ValveSource_SceneProps(PropertyGroup):
 	
 	export_format : EnumProperty(name=get_id("export_format"),items=( ('SMD', "SMD", "Studiomdl Data" ), ('DMX', "DMX", "Datamodel Exchange" ) ),default='DMX')
 	up_axis : EnumProperty(name=get_id("up_axis"),items=axes,default='Z',description=get_id("up_axis_tip"))
-	material_path : StringProperty(name=get_id("dmx_mat_path"),description=get_id("dmx_mat_path_tip"))
+	material_path : StringProperty(name=get_id("dmx_mat_path"),description=get_id("dmx_mat_path_tip"),default=_dev_defaults.get("material_path",""))
 	export_list_active : IntProperty(name=get_id("active_exportable"),default=0,min=0,update=export_active_changed)
 	export_list : CollectionProperty(type=ValveSource_Exportable,options={'SKIP_SAVE','HIDDEN'})
 	use_kv2 : BoolProperty(name="Write KeyValues2",description="Write ASCII DMX files",default=False)
 	game_path : StringProperty(name=get_id("game_path"),description=get_id("game_path_tip"),subtype='DIR_PATH',default=_dev_defaults.get("game_path",""),update=State.onGamePathChanged)
 	dmx_weightlink_threshold : FloatProperty(name=get_id("dmx_weightlinkcull"),description=get_id("dmx_weightlinkcull_tip"),max=1,min=0)
 	smd_format : EnumProperty(name=get_id("smd_format"), items=(('SOURCE', "Source", "Source Engine (Half-Life 2)") , ("GOLDSOURCE", "GoldSrc", "GoldSrc engine (Half-Life 1)")), default="SOURCE")
+
+	# Link VMT Textures
+	vmt_game_root : StringProperty(name=get_id("vmt_game_root"),description=get_id("vmt_game_root_tip"),subtype='DIR_PATH',default=_dev_defaults.get("vmt_game_root",""))
+	vmt_png_root : StringProperty(name=get_id("vmt_png_root"),description=get_id("vmt_png_root_tip"),subtype='DIR_PATH',default=_dev_defaults.get("vmt_png_root",""))
+	vmt_cdmaterials : StringProperty(name=get_id("vmt_cdmaterials"),description=get_id("vmt_cdmaterials_tip"))
 
 class ValveSource_VertexAnimation(PropertyGroup):
 	name : StringProperty(name="Name",default="VertexAnim")
@@ -236,7 +244,8 @@ _classes = (
 	update.SMD_MT_Updated,
 	export_smd.SMD_OT_Compile, 
 	export_smd.SmdExporter, 
-	import_smd.SmdImporter)
+	import_smd.SmdImporter,
+	link_vmt.SMD_OT_LinkVmtTextures)
 
 def register():
 	for cls in _classes:
@@ -246,6 +255,7 @@ def register():
 	bpy.app.translations.register(__name__,translations.translations)
 	
 	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+	bpy.types.TOPBAR_MT_file_import.append(menu_func_import_textures)
 	bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
 	bpy.types.MESH_MT_shape_key_context_menu.append(menu_func_shapekeys)
 	bpy.types.TEXT_MT_edit.append(menu_func_textedit)
@@ -277,6 +287,7 @@ def unregister():
 	State.unhook_events()
 
 	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import_textures)
 	bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
 	bpy.types.MESH_MT_shape_key_context_menu.remove(menu_func_shapekeys)
 	bpy.types.TEXT_MT_edit.remove(menu_func_textedit)

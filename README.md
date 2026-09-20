@@ -95,6 +95,20 @@ To pick up code changes without restarting Blender, use **F8 (Reload Scripts)**.
 
 > `.vscode/` is gitignored in this repository, so `launch.json` and `tasks.json` are local to your checkout and won't come along with a fresh clone.
 
+## Linking Source textures to imported materials
+
+Importing an SMD/DMX/QC only creates Blender materials *named* after the Source material; the add-on doesn't read VMT or VTF files during import. **Link VMT Textures** (Scene Properties > Source Engine Export, or File > Import > Source Engine Textures) fills them in afterwards. It resolves each material name through the game's VMT (`materials/<$cdmaterials>/<name>.vmt` → `$basetexture`, following `patch` includes) and loads a PNG/TGA conversion of the VTF into an Image Texture node, plus `$bumpmap` through a Normal Map and `$translucent`/`$alphatest` into the alpha channel.
+
+The dialog asks for:
+
+- **Game Content** — the extracted game content with the `.vmt` files (e.g. a Crowbar unpack of the VPKs). Defaults to Game Path.
+- **Converted Textures** — the VTFs converted to PNG, keeping their folder structure. With VTFEdit Reloaded: **Tools > Convert Folder** on the `materials` folder, PNG, recursive. Leave empty if you converted in place.
+
+Either field may point at the folder that contains `materials\`, at `materials\` itself, or at `materials\models` — the tool figures out which.
+- **$cdmaterials** — filled in automatically when a QC is imported; otherwise the `$cdmaterials` lines of the model, separated by semicolons. Leave empty to search all of `materials/models` by file name.
+
+Materials that already have an Image Texture node are left alone unless **Overwrite** is ticked. Anything that couldn't be resolved (VMT not found, PNG not found) is listed in a popup and in the System Console.
+
 ## Repository layout
 
 ```
@@ -107,10 +121,11 @@ io_scene_valvesource/   the add-on itself (this folder is what gets zipped/insta
   GUI.py                   panels and menus
   update.py                built-in "check for update" operator (see note below)
   utils.py                 shared helpers
+  link_vmt.py              "Link VMT Textures": assigns VMT/$basetexture images to imported materials
 Tests/                   unit tests, run against Blender-as-a-Python-module
 scripts/
   sync_to_blender.ps1      deploys io_scene_valvesource/ into a local Blender install
-  set_dev_defaults.ps1     writes machine-specific Engine/Game Path defaults (gitignored)
+  set_dev_defaults.ps1     writes machine-specific path defaults (Export/Engine/Game/Material/VMT) (gitignored)
   install_debugpy.ps1      installs debugpy into Blender's Python, for VS Code debugging
   launch_blender_debug.ps1 starts Blender with the debug listener open
   blender_debug_listen.py  runs inside Blender: opens the debug port, loads the add-on
