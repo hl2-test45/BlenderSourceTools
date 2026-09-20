@@ -1,4 +1,5 @@
 __pycache__
 *.pyperf
-.vscode
 TestResults
+*.zip
+io_scene_valvesource/dev_defaults.json

@@ -786,7 +786,9 @@ class SMD_OT_LaunchHLMV(bpy.types.Operator):
 		return bool(context.scene.vs.engine_path)
 		
 	def execute(self,context):
-		args = [os.path.normpath(os.path.join(bpy.path.abspath(context.scene.vs.engine_path),"hlmv"))]
+		engine_path = bpy.path.abspath(context.scene.vs.engine_path)
+		hlmv = "hlmvplusplus" if os.path.exists(os.path.join(engine_path, "hlmvplusplus.exe")) else "hlmv"
+		args = [os.path.normpath(os.path.join(engine_path, hlmv))]
 		if context.scene.vs.game_path:
 			args.extend(["-game",os.path.normpath(bpy.path.abspath(context.scene.vs.game_path))])
 		subprocess.Popen(args)

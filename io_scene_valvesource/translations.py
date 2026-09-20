@@ -656,7 +656,7 @@ _data = {
 },
 'launch_hlmv': {
 	'ja': "HLMVを開始",
-	'en': "Launch HLMV",
+	'en': "Launch HLMV / HLMV++",
 },
 'exportstate_pattern': {
 	'en': "Search pattern",
