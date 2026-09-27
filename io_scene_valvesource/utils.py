@@ -18,7 +18,7 @@
 #
 # ##### END GPL LICENSE BLOCK #####
 
-import bpy, struct, time, collections, os, subprocess, sys, builtins, itertools, dataclasses, typing
+import bpy, struct, time, collections, os, subprocess, sys, builtins, itertools, dataclasses, typing, contextlib
 from bpy.app.translations import pgettext
 from bpy.app.handlers import depsgraph_update_post, load_post, persistent
 from mathutils import Matrix, Vector
@@ -142,6 +142,8 @@ class _StateMeta(type): # class properties are not supported below Python 3.9, s
 	def __init__(cls, *args, **kwargs):
 		cls._exportableObjects = set()
 		cls.last_export_refresh = 0
+		cls._suspend_depth = 0
+		cls._quiet_depth = 0
 		cls._engineBranch = None
 		cls._gamePathValid = False
 		cls._use_action_slots = bpy.app.version >= (4,4,0)
@@ -197,8 +199,21 @@ class State(metaclass=_StateMeta):
 	@staticmethod
 	@persistent
 	def _onDepsgraphUpdate(scene : bpy.types.Scene):
-		if scene == bpy.context.scene and time.time() - State.last_export_refresh > 0.25:
+		if State._suspend_depth == 0 and scene == bpy.context.scene and time.time() - State.last_export_refresh > 0.25:
 			State.update_scene(scene)
+
+	@classmethod
+	@contextlib.contextmanager
+	def suspend_updates(cls, quiet = False):
+		"""Stops the export list from being rebuilt on every depsgraph update, e.g. during a long import.
+		With quiet=True, non-debug console output is silenced too. The caller should refresh the list afterwards."""
+		cls._suspend_depth += 1
+		if quiet: cls._quiet_depth += 1
+		try:
+			yield
+		finally:
+			cls._suspend_depth -= 1
+			if quiet: cls._quiet_depth -= 1
 
 	@staticmethod
 	@persistent
@@ -209,13 +224,13 @@ class State(metaclass=_StateMeta):
 
 	@classmethod
 	def hook_events(cls):
-		if not cls.update_scene in depsgraph_update_post:
+		if not cls._onDepsgraphUpdate in depsgraph_update_post:
 			depsgraph_update_post.append(cls._onDepsgraphUpdate)
 			load_post.append(cls._onLoad)
 
 	@classmethod
 	def unhook_events(cls):
-		if cls.update_scene in depsgraph_update_post:
+		if cls._onDepsgraphUpdate in depsgraph_update_post:
 			depsgraph_update_post.remove(cls._onDepsgraphUpdate)
 			load_post.remove(cls._onLoad)
 
@@ -246,6 +261,8 @@ class State(metaclass=_StateMeta):
 		cls._gamePathValid = False
 
 def print(*args, newline=True, debug_only=False):
+	if State._quiet_depth and bpy.app.debug_value <= 0:
+		return
 	if not debug_only or bpy.app.debug_value > 0:
 		builtins.print(" ".join([str(a) for a in args]).encode(sys.getdefaultencoding()).decode(sys.stdout.encoding or sys.getdefaultencoding()), end= "\n" if newline else "", flush=True)
 
@@ -350,8 +367,15 @@ def animationLength(ad : bpy.types.AnimData):
 					for keyframe in fcurve.keyframe_points:
 						yield keyframe
 
-			keyframeTimes = [kf.co.x for kf in iter_keyframes(ad.action.layers[0].strips[0].channelbag(ad.action_slot))]
-			
+			if not (ad.action_slot and ad.action.layers and ad.action.layers[0].strips):
+				return 0
+			channelbag = ad.action.layers[0].strips[0].channelbag(ad.action_slot)
+			if not channelbag:
+				return 0
+			keyframeTimes = [kf.co.x for kf in iter_keyframes(channelbag)]
+			if not keyframeTimes:
+				return 0
+
 			return ceil(max(keyframeTimes) - min(keyframeTimes))
 		else:
 			return ceil(ad.action.frame_range[1] - ad.action.frame_range[0])
@@ -549,17 +573,35 @@ def shouldExportGroup(group):
 def hasFlexControllerSource(source):
 	return bpy.data.texts.get(source) or os.path.exists(bpy.path.abspath(source))
 
-def channelBagForNewActionSlot(obj : bpy.types.Object, name : str):
+def channelBagForNewActionSlot(obj : bpy.types.Object, name : str, action : bpy.types.Action | None = None, assign = True):
+	"""Adds a slot to the object's action (or to `action`) and returns (channelbag, slot).
+	With assign=False the object keeps its current action and slot, which avoids a depsgraph
+	relations rebuild when many slots are created in a row."""
 	assert(State.useActionSlots)
 	ad = obj.animation_data_create()
-	if not ad.action:
-		ad.action = bpy.data.actions.new(obj.name)
-	slot = ad.action.slots.new(id_type='OBJECT', name=name)
-	ad.action_slot = slot
+	if not action:
+		if not ad.action:
+			ad.action = bpy.data.actions.new(obj.name)
+		action = ad.action
+	slot = action.slots.new(id_type='OBJECT', name=name)
+	if assign:
+		if ad.action != action:
+			ad.action = action
+		ad.action_slot = slot
 
-	layer = ad.action.layers.new(name) if not ad.action.layers else ad.action.layers[0]
+	layer = action.layers.new(name) if not action.layers else action.layers[0]
 	strip = layer.strips.new(type='KEYFRAME') if not layer.strips else layer.strips[0]
-	return typing.cast(bpy.types.ActionChannelbag, strip.channelbag(slot, ensure=True))
+	return typing.cast(bpy.types.ActionChannelbag, strip.channelbag(slot, ensure=True)), slot
+
+def findActionSlot(action : bpy.types.Action | None, handle : int):
+	if action and handle >= 0 and State.useActionSlots:
+		return next((slot for slot in action.slots if slot.handle == handle), None)
+
+# Bones added by the rig generator. They never deform and are left out of every export.
+RIG_BONE_PROP = "bst_rig"
+
+def isRigBone(bone : bpy.types.Bone | bpy.types.EditBone):
+	return bool(bone.get(RIG_BONE_PROP))
 
 def getExportablesForObject(ob):
 	# objects can be reallocated between yields, so capture the ID locally
@@ -725,6 +767,10 @@ class SmdInfo:
 	in_block_comment = False
 	rotMode = 'EULER' # for creating keyframes during import
 	shapeNames : dict | None = None
+	# set when an animation has been imported
+	created_action : bpy.types.Action | None = None
+	created_slot = None # bpy.types.ActionSlot, Blender 4.4+
+	num_frames = 0
 	
 	def __init__(self, jobName : str):
 		self.jobName = jobName
@@ -767,8 +813,43 @@ class QcInfo:
 		self.vars = {}
 		self.dir_stack = []
 
+		# Animations found in the QC and its $include/$includemodel files, keyed by normalised path
+		self.anim_records : dict[str, QcAnimRecord] = {}
+		self.missing_anim_files = []
+		# $animation names are visible to the $sequences of the model which defines them, which includes its $include files
+		# but not its $includemodel files. Sequences are resolved once the model has been read, as they can refer ahead.
+		self.anim_scope : dict[str, QcAnimRecord | None] = {}
+		self.pending_sequences = []
+		self.outer_filedir = ""
+		self.visited_qcs = set()
+		self.unresolved_includes = []
+		self.include_depth = 0
+		self.harvest_only = False # set while reading an $includemodel QC: only animations and rig hints are wanted
+
+		# Collections which are excluded from the view layer once the import has finished
+		self.lod_collection : bpy.types.Collection | None = None
+		self.physics_collection : bpy.types.Collection | None = None
+
+		self.rig_hints = { "ikchains": [], "hitgroups": {} }
+
 	def cd(self):
 		return os.path.join(self.root_filedir,*self.dir_stack)
+
+class QcAnimRecord:
+	"""An animation file referenced by a $sequence or $animation. It is listed on the armature
+	and only imported when the user asks for it."""
+	def __init__(self, name : str, filepath : str, source_qc : str):
+		self.name = name
+		self.filepath = filepath
+		self.source_qc = source_qc
+		self.used_by : list[str] = [] # sequence names
+		self.fps = 30.0
+		self.is_delta = self.is_hidden = self.is_loop = False
+		self.is_helper = name.startswith("@") # Crowbar writes "@..._corrective_animation" helpers for delta sequences
+
+	def add_user(self, sequence_name : str):
+		if sequence_name and sequence_name not in self.used_by:
+			self.used_by.append(sequence_name)
 		
 class KeyFrame:
 	def __init__(self):

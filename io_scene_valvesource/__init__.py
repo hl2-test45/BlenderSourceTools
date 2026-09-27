@@ -46,7 +46,7 @@ for collection in [bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load
 		if func.__module__.startswith(__name__):
 			collection.remove(func)
 
-from . import datamodel, import_smd, export_smd, flex, GUI, update, link_vmt
+from . import datamodel, import_smd, export_smd, flex, GUI, update, link_vmt, anim_list, rig
 from .utils import *
 
 def _load_dev_defaults():
@@ -161,9 +161,37 @@ class ExportableProps():
 	vertex_animations : CollectionProperty(name=get_id("vca_group_props"),type=ValveSource_VertexAnimation)
 	active_vertex_animation : IntProperty(default=-1)
 
+class ValveSource_QcAnimation(PropertyGroup):
+	"""An animation referenced by an imported QC. It is only imported on demand; see anim_list.py."""
+	name : StringProperty(name="Name")
+	filepath : StringProperty(name=get_id("qc_anim_file"), subtype='FILE_PATH')
+	source_qc : StringProperty(name=get_id("qc_anim_source"))
+	used_by : StringProperty(name=get_id("qc_anim_used_by"))
+	fps : FloatProperty(name="FPS", default=30)
+	is_delta : BoolProperty(name="Delta")
+	is_hidden : BoolProperty(name="Hidden")
+	is_loop : BoolProperty(name="Loop")
+	is_helper : BoolProperty(name="Helper")
+	num_frames : IntProperty(name="Frames")
+	action : PointerProperty(type=bpy.types.Action)
+	slot_handle : IntProperty(default=-1)
+
 class ValveSource_ObjectProps(ExportableProps,PropertyGroup):
 	action_filter : StringProperty(name=get_id("slot_filter") if State.useActionSlots else get_id("action_filter"),description=get_id("slot_filter_tip") if State.useActionSlots else get_id("action_filter_tip"))
 	triangulate : BoolProperty(name=get_id("triangulate"),description=get_id("triangulate_tip"),default=False)
+
+	# Animations of the QC this armature was imported from
+	qc_anims : CollectionProperty(type=ValveSource_QcAnimation)
+	qc_anims_active : IntProperty(default=-1, update=anim_list.on_active_changed)
+	qc_action : PointerProperty(type=bpy.types.Action, description="The action which holds the loaded QC animations as slots")
+	qc_path : StringProperty(name=get_id("qc_anims_qc_path"), subtype='FILE_PATH')
+	qc_rot_mode : StringProperty(default='XYZ')
+	qc_up_axis : StringProperty(default='Z')
+	qc_include_search_path : StringProperty(name=get_id("importer_includemodel_path"), description=get_id("importer_includemodel_path_tip"), subtype='DIR_PATH')
+	qc_missing_includes : StringProperty()
+	qc_anims_filter : StringProperty(name=get_id("qc_anims_filter"), description=get_id("qc_anims_filter_tip"), options={'TEXTEDIT_UPDATE'})
+	qc_anims_loaded_only : BoolProperty(name=get_id("qc_anims_loaded_only"), description=get_id("qc_anims_loaded_only_tip"))
+	qc_anims_show_helpers : BoolProperty(name=get_id("qc_anims_show_helpers"), description=get_id("qc_anims_show_helpers_tip"))
 
 class ValveSource_ArmatureProps(PropertyGroup):
 	implicit_zero_bone : BoolProperty(name=get_id("dummy_bone"),default=True,description=get_id("dummy_bone_tip"))
@@ -177,6 +205,7 @@ class ValveSource_ArmatureProps(PropertyGroup):
 	)
 	action_selection : EnumProperty(name=get_id("action_selection_mode"), items=arm_modes,description=get_id("action_selection_mode_tip"),default='CURRENT')
 	legacy_rotation : BoolProperty(name=get_id("bone_rot_legacy"),description=get_id("bone_rot_legacy_tip"),default=False)
+	rig_hints : StringProperty(options={'HIDDEN'}, description="JSON: the $ikchain and $hbox entries of the QC this armature was imported from")
 
 class ValveSource_CollectionProps(ExportableProps,PropertyGroup):
 	mute : BoolProperty(name=get_id("group_suppress"),description=get_id("group_suppress_tip"),default=False)
@@ -208,6 +237,7 @@ _classes = (
 	ValveSource_Exportable,
 	ValveSource_SceneProps,
 	ValveSource_VertexAnimation,
+	ValveSource_QcAnimation,
 	ValveSource_ObjectProps,
 	ValveSource_ArmatureProps,
 	ValveSource_CollectionProps,
@@ -245,7 +275,9 @@ _classes = (
 	export_smd.SMD_OT_Compile, 
 	export_smd.SmdExporter, 
 	import_smd.SmdImporter,
-	link_vmt.SMD_OT_LinkVmtTextures)
+	link_vmt.SMD_OT_LinkVmtTextures,
+	*anim_list.classes,
+	*rig.classes)
 
 def register():
 	for cls in _classes:

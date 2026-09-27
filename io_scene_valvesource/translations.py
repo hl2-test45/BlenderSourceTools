@@ -890,6 +890,180 @@ _data = {
 'link_vmt_report': {
 	'en': "Linked textures to {0} materials, {1} already textured",
 },
+'importer_lazyanims': {
+	'en': "List Animations Only",
+},
+'importer_lazyanims_tip': {
+	'en': "List a QC's animations on its armature and import each one when it is selected in the Source sidebar tab, instead of importing all of them now",
+},
+'importer_includemodel_path': {
+	'en': "$includemodel Folder",
+},
+'importer_includemodel_path_tip': {
+	'en': "Extra folder to search for the decompiled QCs of models named by $includemodel. The QC's own folder is always searched",
+},
+'importer_generate_rig': {
+	'en': "Generate IK Rig",
+},
+'importer_generate_rig_tip': {
+	'en': "Add IK controls to the arms and legs of characters, found from the QC's $ikchain and $hbox entries or from bone names",
+},
+'importer_complete_anims': {
+	'en': "Imported {0} files and listed {1} animations in {2} seconds",
+},
+'importer_qc_lods': {
+	'en': "{0} LODs",
+},
+'importer_qc_physics': {
+	'en': "{0} Physics",
+},
+'importer_qc_includemodel_missing': {
+	'en': "$includemodel \"{0}\": no decompiled QC found. Its animations were not listed",
+},
+'importer_qc_includemodel_depth': {
+	'en': "$includemodel \"{0}\": too many nested models, skipped",
+},
+'importer_qc_anims_missing': {
+	'en': "{0} animation files referenced by the QC were not found (listed in the console)",
+},
+'qc_anims_title': {
+	'en': "QC Animations",
+},
+'qc_anims_count': {
+	'en': "{0} animations, {1} loaded",
+},
+'qc_anims_qc_path': {
+	'en': "QC",
+},
+'qc_anims_filter': {
+	'en': "Filter",
+},
+'qc_anims_filter_tip': {
+	'en': "Show animations whose name, or the name of a sequence which plays them, contains this text",
+},
+'qc_anims_loaded_only': {
+	'en': "Loaded Only",
+},
+'qc_anims_loaded_only_tip': {
+	'en': "Only show animations which have been imported",
+},
+'qc_anims_show_helpers': {
+	'en': "Show Helpers",
+},
+'qc_anims_show_helpers_tip': {
+	'en': "Show the \"@...\" corrective animations which Crowbar writes for delta sequences",
+},
+'qc_anims_used_by': {
+	'en': "Sequences: {0}",
+},
+'qc_anims_missing_include': {
+	'en': "Not found: {0}",
+},
+'qc_anim_file': {
+	'en': "File",
+},
+'qc_anim_source': {
+	'en': "Source QC",
+},
+'qc_anim_used_by': {
+	'en': "Sequences",
+},
+'qc_anim_load': {
+	'en': "Load Animation",
+},
+'qc_anim_load_tip': {
+	'en': "Import this animation and play it",
+},
+'qc_anim_load_failed': {
+	'en': "Could not import {0}",
+},
+'qc_anim_load_filtered': {
+	'en': "Load Shown",
+},
+'qc_anim_load_filtered_tip': {
+	'en': "Import every animation shown by the list's filter. Press Esc to stop",
+},
+'qc_anim_loaded_count': {
+	'en': "Imported {0} animations in {1} seconds",
+},
+'qc_anim_nothing_to_load': {
+	'en': "All shown animations are already loaded",
+},
+'qc_anim_loading': {
+	'en': "Importing animations: {0}/{1} (Esc to stop)",
+},
+'qc_anim_unload': {
+	'en': "Unload Animation",
+},
+'qc_anim_unload_tip': {
+	'en': "Delete this animation's keyframes. It stays in the list and can be imported again",
+},
+'qc_anims_rescan': {
+	'en': "Rescan QC",
+},
+'qc_anims_rescan_tip': {
+	'en': "Read the armature's QC again, and its $includemodel QCs, to list animations which were not found before",
+},
+'qc_anims_rescanned': {
+	'en': "{0} new animations, {1} in total",
+},
+'rig_title': {
+	'en': "IK Rig",
+},
+'rig_generate': {
+	'en': "Generate IK Rig",
+},
+'rig_generate_tip': {
+	'en': "Add IK controls to the arms and legs of the armature, found from its QC's $ikchain and $hbox entries or from bone names. The deforming bones are not changed",
+},
+'rig_generated': {
+	'en': "Rigged {0} limbs of {1}",
+},
+'rig_regenerate': {
+	'en': "Regenerate",
+},
+'rig_remove': {
+	'en': "Remove IK Rig",
+},
+'rig_remove_tip': {
+	'en': "Delete the IK controls and their constraints",
+},
+'rig_err_nochains': {
+	'en': "{0}: no arms or legs found to rig",
+},
+'rig_err_badchain': {
+	'en': "{0}: the bones of this limb overlap, skipped",
+},
+'rig_ikfk_tip': {
+	'en': "0 plays the limb's FK keyframes, 1 makes it follow the IK controls",
+},
+'rig_snap_ik': {
+	'en': "Snap IK to FK",
+},
+'rig_snap_ik_tip': {
+	'en': "Move the IK controls to the limb's current pose and switch it to IK",
+},
+'rig_snap_fk': {
+	'en': "Snap FK to IK",
+},
+'rig_snap_fk_tip': {
+	'en': "Pose the limb's bones where the IK controls put them and switch it to FK",
+},
+'rig_keyframe': {
+	'en': "Insert Keyframes",
+},
+'rig_keyframe_tip': {
+	'en': "Key the snapped controls",
+},
+'rig_all_frames': {
+	'en': "All Frames",
+},
+'rig_all_frames_tip': {
+	'en': "Snap and key every frame of the scene's range, to edit an FK animation with IK",
+},
+'rig_bake_ik': {
+	'en': "Bake Animation to IK",
+},
 }
 
 def _get_ids() -> dict[str,str]:	

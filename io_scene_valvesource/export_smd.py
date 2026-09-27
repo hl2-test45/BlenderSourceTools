@@ -546,7 +546,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 			if not self.armature:
 				self.armature = self.bakeObj(self.armature_src).object
 			exporting_armature = isinstance(id, bpy.types.Object) and id.type == 'ARMATURE'
-			self.exportable_bones = list([self.armature.pose.bones[edit_bone.name] for edit_bone in self.armature.data.bones if (exporting_armature or edit_bone.use_deform)])
+			self.exportable_bones = list([self.armature.pose.bones[edit_bone.name] for edit_bone in self.armature.data.bones if (exporting_armature or edit_bone.use_deform) and not isRigBone(edit_bone)])
 			skipped_bones = len(self.armature.pose.bones) - len(self.exportable_bones)
 			if skipped_bones:
 				print("- Skipping {} non-deforming bones".format(skipped_bones))
@@ -1022,7 +1022,7 @@ class SmdExporter(bpy.types.Operator, Logger):
 
 				self.smd_file.write(line + "\n")
 
-			num_bones = len(self.armature.data.bones)
+			num_bones = len(self.exportable_bones)
 			if filetype == 'smd': print("- Exported",num_bones,"bones")
 			
 			max_bones = 128
@@ -1938,7 +1938,7 @@ skeleton
 					bpy.ops.object.mode_set(mode='POSE')
 					ops.pose.armature_apply() # refreshes the armature's internal state, required!
 					if State.useActionSlots:
-						fcurves = channelBagForNewActionSlot(vca_arm, vca_name).fcurves
+						fcurves = channelBagForNewActionSlot(vca_arm, vca_name)[0].fcurves
 					else:
 						action = vca_arm.animation_data_create().action = bpy.data.actions.new("vcaanim_" + vca_name)
 						fcurves = action.fcurves

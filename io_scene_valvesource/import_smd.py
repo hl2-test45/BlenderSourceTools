@@ -1,4 +1,4 @@
-﻿#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
+#  Copyright (c) 2014 Tom Edwards contact@steamreview.org
 #
 # ##### BEGIN GPL LICENSE BLOCK #####
 #
@@ -28,95 +28,98 @@ from typing import cast
 from .utils import *
 from . import datamodel, ordered_set, flex
 
-class SmdImporter(bpy.types.Operator, Logger):
-	bl_idname = "import_scene.smd"
-	bl_label = get_id("importer_title")
-	bl_description = get_id("importer_tip")
-	bl_options = {'UNDO', 'PRESET'}
-	
+# QC option keywords which can follow a $sequence or $animation. Everything else at the start of a line
+# inside a sequence block is a reference to an animation file or to a $animation.
+_qc_sequence_options = frozenset((
+	"activity", "addlayer", "align", "alignbone", "alignboneto", "alignto", "animation", "autoik", "autolay", "autoplay",
+	"blend", "blendcenter", "blendcomp", "blendlayer", "blendref", "blendwidth", "bonesaveframe", "calcblend", "cmd",
+	"compress", "counterrotate", "counterrotateto", "delta", "derivative", "event", "exit", "fadein", "fadeout",
+	"fixuploop", "fps", "frame", "frames", "hidden", "ik", "iklock", "ikrule", "keyvalues", "localhierarchy", "loop",
+	"motionrollback", "noanimation", "noanimblock", "noanimblockstall", "noanimload", "noautoik", "noforceloop", "node",
+	"numframes", "origin", "posecycle", "post", "predelta", "presubtract", "realtime", "reverse", "rotate", "rotateto",
+	"rtransition", "scale", "snap", "spline", "startloop", "subtract", "transision", "transition", "walkframe",
+	"weightlist", "worldspace", "xfade",
+	"lx", "ly", "lz", "lxr", "lyr", "lzr", "lm", "lq", "x", "y", "z", "xr", "yr", "zr",
+))
+
+def _normaliseQcPath(path):
+	if (os.path.sep == '/'):
+		path = path.replace('\\','/')
+	return os.path.normpath(path)
+
+def _qcFileKey(path):
+	return os.path.normcase(os.path.realpath(path))
+
+def _findLayerCollection(layer_collection : bpy.types.LayerCollection, collection : bpy.types.Collection):
+	if layer_collection.collection == collection:
+		return layer_collection
+	for child in layer_collection.children:
+		found = _findLayerCollection(child, collection)
+		if found:
+			return found
+
+class _QcSequenceBlock:
+	"""Collects the animation references and options of one $sequence or $animation while its lines are read."""
+	def __init__(self, keyword : str, name : str, raw_name : str, source_qc : str):
+		self.keyword = keyword
+		self.name = name # lowercase on Windows, like the rest of the parsed QC
+		self.raw_name = raw_name
+		self.source_qc = source_qc
+		self.refs : list[tuple[str, str, str]] = [] # (word, raw word, current QC folder)
+		self.depth = 0
+		self.opened = False
+		self.awaiting_brace = False # header line without "{": the block may open on the next line
+		self.fps = None
+		self.activity = ""
+		self.is_delta = self.is_hidden = self.is_loop = False
+
+	def read(self, words : list[str], raw_words : list[str], cd : str, start = 0):
+		refs_allowed = self.keyword == "$sequence" # an $animation's only reference is the file after its name
+		previous = None
+		for i in range(start, len(words)):
+			word = words[i]
+			if word == "{":
+				self.depth += 1
+				self.opened = True
+				self.awaiting_brace = False
+			elif word == "}":
+				self.depth -= 1
+				refs_allowed = False
+			elif self.depth > 1:
+				pass # nested block, e.g. "{ event 5004 0 "sound" }" or keyvalues
+			elif previous == "fps":
+				try: self.fps = float(word)
+				except ValueError: pass
+			elif previous == "activity":
+				self.activity = raw_words[i]
+			elif word.lower() in _qc_sequence_options:
+				refs_allowed = False
+				option = word.lower()
+				if option == "loop": self.is_loop = True
+				elif option in ("delta", "subtract", "predelta"): self.is_delta = True
+				elif option == "hidden": self.is_hidden = True
+			elif refs_allowed:
+				self.refs.append((word, raw_words[i], cd))
+			previous = word.lower() if self.depth <= 1 else None
+
+	@property
+	def finished(self):
+		return self.depth <= 0 and self.opened
+
+class SmdImportCore(Logger):
+	"""The SMD/VTA/DMX/QC reading code, shared by the import operator and by AnimLoader."""
 	qc : QcInfo | None = None
 	smd : SmdInfo
 
-	# Properties used by the file browser
-	filepath : StringProperty(name="File Path", description="File filepath used for importing the SMD/VTA/DMX/QC file", maxlen=1024, default="", options={'HIDDEN'})
-	files : CollectionProperty(type=bpy.types.OperatorFileListElement, options={'HIDDEN'})
-	directory : StringProperty(maxlen=1024, default="", subtype='FILE_PATH', options={'HIDDEN'})
-	filter_folder : BoolProperty(name="Filter Folders", description="", default=True, options={'HIDDEN'})
-	filter_glob : StringProperty(default="*.smd;*.vta;*.dmx;*.qc;*.qci", options={'HIDDEN'})
-
-	# Custom properties
-	doAnim : BoolProperty(name=get_id("importer_doanims"), default=True)
-	createCollections : BoolProperty(name=get_id("importer_use_collections"), description=get_id("importer_use_collections_tip"), default=True)
-	makeCamera : BoolProperty(name=get_id("importer_makecamera"),description=get_id("importer_makecamera_tip"),default=False)
-	append : EnumProperty(name=get_id("importer_bones_mode"),description=get_id("importer_bones_mode_desc"),items=(
-		('VALIDATE',get_id("importer_bones_validate"),get_id("importer_bones_validate_desc")),
-		('APPEND',get_id("importer_bones_append"),get_id("importer_bones_append_desc")),
-		('NEW_ARMATURE',get_id("importer_bones_newarm"),get_id("importer_bones_newarm_desc"))),
-		default='APPEND')
-	upAxis : EnumProperty(name="Up Axis",items=axes,default='Z',description=get_id("importer_up_tip"))
-	rotMode : EnumProperty(name=get_id("importer_rotmode"),items=( ('XYZ', "Euler", ''), ('QUATERNION', "Quaternion", "") ),default='XYZ',description=get_id("importer_rotmode_tip"))
-	boneMode : EnumProperty(name=get_id("importer_bonemode"),items=(('NONE','Default',''),('ARROWS','Arrows',''),('SPHERE','Sphere','')),default='SPHERE',description=get_id("importer_bonemode_tip"))
-	
-	def __init__(self, *args, **kwargs):
-		bpy.types.Operator.__init__(self, *args, **kwargs)
-		Logger.__init__(self)
-
-	def execute(self, context):
-		pre_obs = set(bpy.context.scene.objects)
-		pre_eem = context.preferences.edit.use_enter_edit_mode
-		pre_append = self.append
-		context.preferences.edit.use_enter_edit_mode = False
-
-		self.existingBones = [] # bones which existed before importing began
-		self.num_files_imported = 0
-
-		for filepath in [os.path.join(self.directory,file.name) for file in self.files] if self.files else [self.filepath]:
-			filepath_lc = filepath.lower()
-			if filepath_lc.endswith('.qc') or filepath_lc.endswith('.qci'):
-				self.num_files_imported = self.readQC(filepath, False, self.properties.doAnim, self.properties.makeCamera, self.properties.rotMode, outer_qc=True)
-				bpy.context.view_layer.objects.active = self.qc.a
-			elif filepath_lc.endswith('.smd'):
-				self.num_files_imported = self.readSMD(filepath, self.properties.upAxis, self.properties.rotMode)
-			elif filepath_lc.endswith ('.vta'):
-				self.num_files_imported = self.readSMD(filepath, self.properties.upAxis, self.properties.rotMode, smd_type=FLEX)
-			elif filepath_lc.endswith('.dmx'):
-				self.num_files_imported = self.readDMX(filepath, self.properties.upAxis, self.properties.rotMode)
-			else:
-				if len(filepath_lc) == 0:
-					self.report({'ERROR'},get_id("importer_err_nofile"))
-				else:
-					self.report({'ERROR'},get_id("importer_err_badfile", True).format(os.path.basename(filepath)))
-
-			self.append = pre_append
-
-		self.errorReport(get_id("importer_complete", True).format(self.num_files_imported,self.elapsed_time()))
-		if self.num_files_imported:
-			ops.object.select_all(action='DESELECT')
-			new_obs = set(bpy.context.scene.objects).difference(pre_obs)
-			xy = xyz = 0
-			for ob in new_obs:
-				ob.select_set(True)
-				# FIXME: assumes meshes are centered around their origins
-				xy = max(xy, int(max(ob.dimensions[0],ob.dimensions[1])) )
-				xyz = max(xyz, max(xy,int(ob.dimensions[2])))
-			bpy.context.view_layer.objects.active = self.qc.a if self.qc else self.smd.a
-			for area in context.screen.areas:
-				if area.type == 'VIEW_3D':
-					area.spaces.active.clip_end = max( area.spaces.active.clip_end, xyz * 2 )
-		if bpy.context.area and bpy.context.area.type == 'VIEW_3D' and bpy.context.region:
-			ops.view3d.view_selected()
-
-		context.preferences.edit.use_enter_edit_mode = pre_eem
-		self.append = pre_append
-
-		State.update_scene(context.scene)
-
-		return {'FINISHED'}
-
-	def invoke(self, context, event):
-		self.properties.upAxis = context.scene.vs.up_axis
-		bpy.context.window_manager.fileselect_add(self)
-		return {'RUNNING_MODAL'}
+	# Settings which the import operator exposes as properties. Plain Python users of this class set them in __init__.
+	target_armature : bpy.types.Object | None = None # import into this armature instead of searching the scene for one
+	target_action : bpy.types.Action | None = None # add animation slots to this action instead of the armature's current one
+	assign_slot = True # make each imported animation the armature's active one
+	modifyScene = True # rename the scene and change its frame range
+	parentCollection : bpy.types.Collection | None = None # link new collections here instead of to the scene
+	includeSearchPath = ""
+	lazyAnims = False
+	generateRig = False
 
 	def ensureAnimationBonesValidated(self):
 		if self.smd.jobType == ANIM and self.append == 'APPEND' and (hasattr(self.smd,"a") or self.findArmature()):
@@ -162,12 +165,15 @@ class SmdImporter(bpy.types.Operator, Logger):
 		smd.file.seek(0,0) # rewind to start of file
 		
 	# joins up "quoted values" that would otherwise be delimited, removes comments
-	def parseQuoteBlockedLine(self,line,lower=True):
+	# With return_raw=True, also returns the same words without any case folding. Never parse a line twice:
+	# block comment state is carried over from one call to the next.
+	def parseQuoteBlockedLine(self,line,lower=True,return_raw=False):
 		if len(line) == 0:
-			return ["\n"]
-		
+			return (["\n"], ["\n"]) if return_raw else ["\n"]
+
 		qc = self.qc
 		words = []
+		raw_words = []
 		last_word_start = 0
 		in_quote = in_whitespace = False
 
@@ -206,6 +212,7 @@ class SmdImporter(bpy.types.Operator, Logger):
 				if char in [" ","\t"]:
 					cur_word = line[last_word_start:i].strip("\"") # characters between last whitespace and here
 					if len(cur_word) > 0:
+						raw_words.append(cur_word)
 						if (lower and os.name == 'nt') or cur_word[0] == "$":
 							cur_word = cur_word.lower()
 						words.append(cur_word)
@@ -220,14 +227,17 @@ class SmdImporter(bpy.types.Operator, Logger):
 		cur_word = cur_word.strip("\"{")
 		if len(cur_word) > 0:
 			words.append(cur_word)
+			raw_words.append(cur_word)
 
 		if needBracket:
 			words.append("{")
+			raw_words.append("{")
 
 		if line.endswith("\\\\\n") and (len(words) == 0 or words[-1] != "\\\\"):
 			words.append("\\\\") # macro continuation beats everything
+			raw_words.append("\\\\")
 
-		return words
+		return (words, raw_words) if return_raw else words
 
 	# Bones
 	def readNodes(self):
@@ -298,7 +308,8 @@ class SmdImporter(bpy.types.Operator, Logger):
 			if parent_id != -1:
 				smd.a.data.edit_bones[bone_name].parent = smd.a.data.edit_bones[ smd.boneIDs[parent_id] ]
 
-		ops.object.mode_set(mode='OBJECT')
+		if smd.a.mode == 'EDIT' or smd.jobType != ANIM: # animations only need a mode switch if bones were added
+			ops.object.mode_set(mode='OBJECT')
 		if boneParents: print("- Imported {} new bones".format(len(boneParents)) )
 
 		if len(smd.a.data.bones) > 128:
@@ -358,79 +369,59 @@ class SmdImporter(bpy.types.Operator, Logger):
 							if c == '/': pos += 1
 							smd.shapeNames[frame] = line[pos+1:].strip()
 
-		bpy.context.view_layer.objects.active = smd.a
-		ops.object.mode_set(mode='POSE')
-
 		num_frames = 0
 		keyframes = collections.defaultdict(list)
-		phantom_keyframes = collections.defaultdict(list)	# bones that aren't in the reference skeleton
-		
+		upAxisMat = getUpAxisMat(smd.upAxis)
+		pose_bones = {}
+		for bone_id, bone_name in smd.boneIDs.items():
+			bone = smd.a.pose.bones.get(bone_name)
+			if bone:
+				pose_bones[bone_id] = bone
+
 		for line in smd.file:
 			if smdBreak(line):
 				break
 			if smdContinue(line):
 				continue
-				
+
 			values = line.split()
 
 			if values[0] == "time": # frame number is a dummy value, all frames are equally spaced
 				if num_frames > 0:
 					if smd.jobType == REF:
 						self.warning(get_id("importer_err_refanim",True).format(smd.jobName))
-						for line in smd.file: # skip to end of block						
+						for line in smd.file: # skip to end of block
 							if smdBreak(line):
 								break
 							if smdContinue(line):
 								continue
 				num_frames += 1
 				continue
-				
-			# Read SMD data
-			pos = Vector([float(values[1]), float(values[2]), float(values[3])])
-			rot = Euler([float(values[4]), float(values[5]), float(values[6])])
-			
+
+			bone = pose_bones.get(int(values[0]))
+			if not bone:
+				continue # not in the armature: the bone count mismatch was reported by readNodes
+
 			keyframe = KeyFrame()
 			keyframe.frame = num_frames - 1
-			keyframe.matrix = Matrix.Translation(pos) @ rot.to_matrix().to_4x4()
+			keyframe.matrix = Matrix.LocRotScale(Vector((float(values[1]), float(values[2]), float(values[3]))), Euler((float(values[4]), float(values[5]), float(values[6]))), None)
 			keyframe.pos = keyframe.rot = True
-			
-			# store the keyframe
-			frameIndex = int(values[0])
-			try:
-				bone = smd.a.pose.bones[ smd.boneIDs[frameIndex] ]
-				if smd.jobType == REF and not bone.parent:
-					keyframe.matrix = getUpAxisMat(smd.upAxis) @ keyframe.matrix
-				keyframes[bone].append(keyframe)
-			except KeyError:
-				if smd.jobType == REF and not smd.phantomParentIDs.get(frameIndex):
-					keyframe.matrix = getUpAxisMat(smd.upAxis) @ keyframe.matrix
-				phantom_keyframes[frameIndex].append(keyframe)
-			
-		# All frames read, apply phantom bones
-		for ID, parentID in smd.phantomParentIDs.items():
-			bone_id = smd.boneIDs.get(ID)
-			bone = smd.a.pose.bones.get(bone_id) if bone_id else None
-			if not bone: continue
-			for phantom_keyframe in phantom_keyframes[bone]:
-				phantom_parent = parentID
-				if len(keyframes[bone]) >= phantom_keyframe.frame: # is there a keyframe to modify?
-					while phantom_keyframes.get(phantom_parent): # parents are recursive
-						phantom_source_frame = phantom_keyframe.frame
-						while not phantom_keyframes[phantom_parent].get(phantom_keyframe.frame): # rewind to the last value
-							if phantom_source_frame == 0: continue # should never happen
-							phantom_source_frame -= 1
-						# Apply the phantom bone, then recurse
-						keyframes[bone][phantom_keyframe.frame].matrix = phantom_keyframes[phantom_parent][phantom_source_frame] @ keyframes[bone][phantom_keyframe.frame].matrix
-						phantom_parent = smd.phantomParentIDs.get(phantom_parent)
-		
+			if smd.jobType == REF and not bone.parent:
+				keyframe.matrix = upAxisMat @ keyframe.matrix
+			keyframes[bone].append(keyframe)
+
 		self.applyFrames(keyframes,num_frames)
 
 	def applyFrames(self, keyframes : typing.Dict[bpy.types.PoseBone,list[KeyFrame]], num_frames : int):
 		smd = self.smd
 		assert(smd.a)
-		ops.object.mode_set(mode='POSE')
+		apply_reference_pose = self.append != 'VALIDATE' and smd.jobType in [REF,ANIM] and not self.appliedReferencePose
 
-		if self.append != 'VALIDATE' and smd.jobType in [REF,ANIM] and not self.appliedReferencePose:
+		if apply_reference_pose or smd.jobType != ANIM:
+			bpy.context.view_layer.objects.active = smd.a
+			ops.object.mode_set(mode='POSE')
+
+		if apply_reference_pose:
 			self.appliedReferencePose = True
 
 			for bone in smd.a.pose.bones:
@@ -444,9 +435,9 @@ class SmdImporter(bpy.types.Operator, Logger):
 					bone.matrix = kf[0].matrix
 			ops.pose.armature_apply()
 
-			bone_vis = None if self.properties.boneMode == 'NONE' else bpy.data.objects.get("smd_bone_vis")
-			
-			if self.properties.boneMode == 'SPHERE' and (not bone_vis or bone_vis.type != 'MESH'):
+			bone_vis = None if self.boneMode == 'NONE' else bpy.data.objects.get("smd_bone_vis")
+
+			if self.boneMode == 'SPHERE' and (not bone_vis or bone_vis.type != 'MESH'):
 					ops.mesh.primitive_ico_sphere_add(subdivisions=3,radius=2)
 					bone_vis = bpy.context.active_object
 					bone_vis.data.name = bone_vis.name = "smd_bone_vis"
@@ -454,12 +445,12 @@ class SmdImporter(bpy.types.Operator, Logger):
 					for collection in bone_vis.users_collection:
 						collection.objects.unlink(bone_vis) # don't want the user deleting this
 					bpy.context.view_layer.objects.active = smd.a
-			elif self.properties.boneMode == 'ARROWS' and (not bone_vis or bone_vis.type != 'EMPTY'):
+			elif self.boneMode == 'ARROWS' and (not bone_vis or bone_vis.type != 'EMPTY'):
 					bone_vis = bpy.data.objects.new("smd_bone_vis",None)
 					bone_vis.use_fake_user = True
 					bone_vis.empty_display_type = 'ARROWS'
 					bone_vis.empty_display_size = 5
-				
+
 			# Calculate armature dimensions...Blender should be doing this!
 			maxs = Vector()
 			mins = Vector()
@@ -467,144 +458,167 @@ class SmdImporter(bpy.types.Operator, Logger):
 				for i in range(3):
 					maxs[i] = max(maxs[i],bone.head_local[i])
 					mins[i] = min(mins[i],bone.head_local[i])
-		
+
 			dimensions = []
 			if self.qc: self.qc.dimensions = dimensions
 			for i in range(3):
 				dimensions.append(maxs[i] - mins[i])
-		
+
 			length = max(0.001, (dimensions[0] + dimensions[1] + dimensions[2]) / 600) # very small indeed, but a custom bone is used for display
-		
+
 			# Apply spheres
 			ops.object.mode_set(mode='EDIT')
 			for bone in [smd.a.data.edit_bones[b.name] for b in keyframes.keys()]:
 				bone.tail = bone.head + (bone.tail - bone.head).normalized() * length # Resize loose bone tails based on armature size
 				smd.a.pose.bones[bone.name].custom_shape = bone_vis # apply bone shape
-				
-		
+
+			if smd.jobType == ANIM:
+				ops.object.mode_set(mode='OBJECT') # the animation is keyed against the new rest pose, which edit mode hasn't written yet
+
 		if smd.jobType == ANIM:
-			if not smd.a.animation_data:
-				smd.a.animation_data_create()
-
-			if State.useActionSlots:
-				channelbag = channelBagForNewActionSlot(smd.a, smd.jobName)				
-
-				fcurves = channelbag.fcurves
-				groups = channelbag.groups
-			else:
-				action = bpy.data.actions.new(smd.jobName)
-				action.use_fake_user = True
-				smd.a.animation_data.action = action
-
-				fcurves = action.fcurves
-				groups = action.groups
-		
-			ops.object.mode_set(mode='POSE')
-		
-			# Create an animation
-			bpy.context.scene.frame_start = 0
-			bpy.context.scene.frame_end = num_frames - 1		
-			
-			for bone in smd.a.pose.bones:
-				bone.rotation_mode = smd.rotMode
-				
-			for bone,frames in list(keyframes.items()):
-				if not frames:
-					del keyframes[bone]
-			
-			if smd.isDMX == False:
-				# Remove every point but the first unless there is motion
-				still_bones = list(keyframes.keys())
-				for bone in keyframes.keys():
-					bone_keyframes = keyframes[bone]
-					for keyframe in bone_keyframes[1:]:
-						diff = keyframe.matrix.inverted() @ bone_keyframes[0].matrix
-						if diff.to_translation().length > 0.00001 or abs(diff.to_quaternion().w) > 0.0001:
-							still_bones.remove(bone)
-							break
-				for bone in still_bones:
-					keyframes[bone] = [keyframes[bone][0]]
-			
-			# Create Blender keyframes
-			def ApplyRecursive(bone):
-				keys = keyframes.get(bone)
-				if keys:
-					# Generate curves					
-					curvesLoc = None
-					curvesRot = None
-					bone_string = "pose.bones[\"{}\"].".format(bone.name)				
-					group = groups.new(name=bone.name)
-					
-					# Apply each imported keyframe
-					for keyframe in keys:
-						# Transform
-						if smd.a.data.vs.legacy_rotation:
-							keyframe.matrix @= mat_BlenderToSMD.inverted()
-						
-						if bone.parent:
-							if smd.a.data.vs.legacy_rotation: parentMat = bone.parent.matrix @ mat_BlenderToSMD
-							else: parentMat = bone.parent.matrix
-							bone.matrix = parentMat @ keyframe.matrix
-						else:
-							bone.matrix = getUpAxisMat(smd.upAxis) @ keyframe.matrix
-						
-						# Key location					
-						if keyframe.pos:
-							if curvesLoc is None:
-								curvesLoc = []
-								for i in range(3):
-									curve = fcurves.new(data_path=bone_string + "location",index=i)
-									curve.group = group
-									curvesLoc.append(curve)
-
-							for i in range(3):
-								curvesLoc[i].keyframe_points.add(1)
-								curvesLoc[i].keyframe_points[-1].co = [keyframe.frame, bone.location[i]]
-						
-						# Key rotation
-						if keyframe.rot:
-							if curvesRot is None:
-								curvesRot = []
-								for i in range(3 if smd.rotMode == 'XYZ' else 4):
-									curve = fcurves.new(data_path=bone_string + "rotation_" + ("euler" if smd.rotMode == 'XYZ' else "quaternion"),index=i)
-									curve.group = group
-									curvesRot.append(curve)
-
-							if smd.rotMode == 'XYZ':
-								for i in range(3):
-									curvesRot[i].keyframe_points.add(1)
-									curvesRot[i].keyframe_points[-1].co = [keyframe.frame, bone.rotation_euler[i]]
-							else:
-								for i in range(4):
-									curvesRot[i].keyframe_points.add(1)
-									curvesRot[i].keyframe_points[-1].co = [keyframe.frame, bone.rotation_quaternion[i]]
-
-				# Recurse
-				for child in bone.children:
-					ApplyRecursive(child)
-			
-			# Start keying
-			for bone in smd.a.pose.bones:			
-				if not bone.parent:
-					ApplyRecursive(bone)
-			
-			for fc in fcurves:
-				fc.update()
-
-		# clear any unkeyed poses
-		for bone in smd.a.pose.bones:
-			bone.location.zero()
-			if smd.rotMode == 'XYZ': bone.rotation_euler.zero()
-			else: bone.rotation_quaternion.identity()
-		scn = bpy.context.scene
-		
-		if scn.frame_current == 1: # Blender starts on 1, Source starts on 0
-			scn.frame_set(0)
+			self._keyAnimation(keyframes, num_frames)
 		else:
-			scn.frame_set(scn.frame_current)
-		ops.object.mode_set(mode='OBJECT')
-		
+			# clear any unkeyed poses
+			for bone in smd.a.pose.bones:
+				bone.location.zero()
+				if smd.rotMode == 'XYZ': bone.rotation_euler.zero()
+				else: bone.rotation_quaternion.identity()
+			scn = bpy.context.scene
+
+			if scn.frame_current == 1: # Blender starts on 1, Source starts on 0
+				scn.frame_set(0)
+			else:
+				scn.frame_set(scn.frame_current)
+			ops.object.mode_set(mode='OBJECT')
+
 		print( "- Imported {} frames of animation".format(num_frames) )
+
+	def _keyAnimation(self, keyframes : typing.Dict[bpy.types.PoseBone,list[KeyFrame]], num_frames : int):
+		"""Keys an animation into a new action slot (or a new action before Blender 4.4) without changing the pose,
+		the object mode or the scene.
+
+		Each keyframe holds a bone's transform relative to its parent. Setting PoseBone.matrix to the parent's pose
+		matrix multiplied by that transform, then reading the bone's location and rotation back, is equivalent to
+		basis = rest⁻¹ @ parent_rest @ keyframe, because the parent's pose cancels out. Computing that directly
+		avoids dozens of RNA calls per bone per frame. Keys are then written to each F-Curve in a single batch."""
+		smd = self.smd
+		arm = smd.a
+		ad = arm.animation_data or arm.animation_data_create()
+
+		if State.useActionSlots:
+			channelbag, slot = channelBagForNewActionSlot(arm, smd.jobName, action=self.target_action, assign=self.assign_slot)
+			fcurves = channelbag.fcurves
+			groups = channelbag.groups
+			smd.created_action = self.target_action or ad.action
+			smd.created_slot = slot
+		else:
+			action = bpy.data.actions.new(smd.jobName)
+			action.use_fake_user = True
+			if self.assign_slot:
+				ad.action = action
+			fcurves = action.fcurves
+			groups = action.groups
+			smd.created_action = action
+			smd.created_slot = None
+		smd.num_frames = num_frames
+
+		if self.assign_slot:
+			for bone in arm.pose.bones:
+				bone.matrix_basis.identity() # bones which this animation doesn't key must not keep another animation's pose
+
+		legacy = arm.data.vs.legacy_rotation
+		legacy_mat = mat_BlenderToSMD
+		legacy_mat_inv = mat_BlenderToSMD.inverted()
+		upAxisMat = getUpAxisMat(smd.upAxis)
+		use_quat = smd.rotMode != 'XYZ'
+		rot_path = "rotation_quaternion" if use_quat else "rotation_euler"
+		# A channel is constant if it varies less than this. Rotations are tighter as small errors move the ends of limbs.
+		loc_tolerance = 0.00001
+		rot_tolerance = 0.000001
+
+		last_frame = max((kf.frame for kfs in keyframes.values() for kf in kfs), default=0)
+		max_keyed_frame = None
+		first_curve = None
+
+		def keyChannel(data_path, index, group, frames, values, tolerance):
+			nonlocal first_curve, max_keyed_frame
+			if len(values) > 1 and max(values) - min(values) <= tolerance:
+				frames = frames[:1] # a constant channel needs only one key
+				values = values[:1]
+			curve = fcurves.new(data_path=data_path, index=index)
+			curve.group = group
+			curve.keyframe_points.add(len(frames))
+			curve.keyframe_points.foreach_set("co", [co for key in zip(frames, values) for co in key])
+			curve.update()
+			if first_curve is None:
+				first_curve = curve
+			max_keyed_frame = frames[-1] if max_keyed_frame is None else max(max_keyed_frame, frames[-1])
+
+		for bone in arm.pose.bones:
+			bone_keyframes = keyframes.get(bone)
+			if not bone_keyframes:
+				continue
+			if bone.rotation_mode != smd.rotMode:
+				bone.rotation_mode = smd.rotMode
+
+			data_bone = bone.bone
+			rest = data_bone.matrix_local
+			parent_rest = data_bone.parent.matrix_local if data_bone.parent else None
+			if parent_rest is not None:
+				parent_space = parent_rest @ legacy_mat if legacy else parent_rest
+			else:
+				parent_space = upAxisMat
+			right = legacy_mat_inv if legacy else None
+			default_flags = data_bone.use_inherit_rotation and data_bone.inherit_scale == 'FULL' and data_bone.use_local_location
+			left = rest.inverted() @ parent_space
+
+			loc_frames = []
+			loc_values = ([], [], [])
+			rot_frames = []
+			rot_values = ([], [], [], []) if use_quat else ([], [], [])
+			prev_rot = None
+
+			for keyframe in bone_keyframes:
+				matrix = keyframe.matrix if right is None else keyframe.matrix @ right
+				if default_flags:
+					basis = left @ matrix
+				elif parent_rest is not None:
+					basis = data_bone.convert_local_to_pose(parent_space @ matrix, rest, parent_matrix=parent_rest, parent_matrix_local=parent_rest, invert=True)
+				else:
+					basis = data_bone.convert_local_to_pose(parent_space @ matrix, rest, invert=True)
+
+				if keyframe.pos:
+					loc = basis.to_translation()
+					loc_frames.append(keyframe.frame)
+					for i in range(3):
+						loc_values[i].append(loc[i])
+				if keyframe.rot:
+					if use_quat:
+						rot = basis.to_quaternion()
+						if prev_rot is not None and prev_rot.dot(rot) < 0:
+							rot.negate() # stay on the same hemisphere so that curves don't flip
+					else:
+						rot = basis.to_euler('XYZ', prev_rot) if prev_rot is not None else basis.to_euler('XYZ')
+					prev_rot = rot
+					rot_frames.append(keyframe.frame)
+					for i in range(len(rot_values)):
+						rot_values[i].append(rot[i])
+
+			group = groups.new(name=bone.name)
+			bone_path = 'pose.bones["{}"].'.format(bpy.utils.escape_identifier(bone.name))
+			if loc_frames:
+				for i in range(3):
+					keyChannel(bone_path + "location", i, group, loc_frames, loc_values[i], loc_tolerance)
+			if rot_frames:
+				for i in range(len(rot_values)):
+					keyChannel(bone_path + rot_path, i, group, rot_frames, rot_values[i], rot_tolerance)
+
+		# The length of an animation is read from its keys. Don't let a static ending shorten it.
+		if first_curve and max_keyed_frame is not None and max_keyed_frame < last_frame:
+			value = first_curve.evaluate(last_frame)
+			first_curve.keyframe_points.add(1)
+			first_curve.keyframe_points[-1].co = (last_frame, value)
+			first_curve.update()
 
 	def getMeshMaterial(self,mat_name):
 		smd = self.smd
@@ -917,25 +931,26 @@ class SmdImporter(bpy.types.Operator, Logger):
 		print("- Imported",num_shapes,"flex shapes")
 
 	# Parses a QC file
-	def readQC(self, filepath, newscene, doAnim, makeCamera, rotMode, outer_qc = False):
+	# harvest_only: only list the QC's animations and read its rig hints, e.g. to rescan the QC of an existing armature
+	def readQC(self, filepath, newscene, doAnim, makeCamera, rotMode, outer_qc = False, harvest_only = False):
 		filename = os.path.basename(filepath)
 		filedir = os.path.dirname(filepath)
-
-		def normalisePath(path):
-			if (os.path.sep == '/'):
-				path = path.replace('\\','/')
-			return os.path.normpath(path)
+		normalisePath = _normaliseQcPath
 
 		if outer_qc:
 			print("\nQC IMPORTER: now working on",filename)
-			
+
 			qc = self.qc = QcInfo()
 			qc.startTime = time.time()
 			qc.jobName = filename
-			qc.root_filedir = filedir
+			qc.root_filedir = qc.outer_filedir = filedir
 			qc.makeCamera = makeCamera
-			qc.animation_names = []
-			if newscene:
+			qc.harvest_only = harvest_only
+			qc.a = self.target_armature
+			qc.visited_qcs.add(_qcFileKey(filepath))
+			if harvest_only:
+				pass
+			elif newscene:
 				bpy.context.screen.scene = bpy.data.scenes.new(filename) # BLENDER BUG: this currently doesn't update bpy.context.scene
 			else:
 				bpy.context.scene.name = filename
@@ -943,35 +958,53 @@ class SmdImporter(bpy.types.Operator, Logger):
 			qc = self.qc
 
 		file = open(filepath, 'r')
-		in_bodygroup = in_lod = in_sequence = False
-		seq_has_file = False # the current $sequence/$animation block already referenced its animation file
-		lod = 0
+		in_bodygroup = in_lod = False
+		lod_threshold = None
+		source_qc = os.path.splitext(filename)[0]
+		sequence : _QcSequenceBlock | None = None # the $sequence or $animation being read
 		for line_str in file:
-			line = self.parseQuoteBlockedLine(line_str)
+			line, raw_line = self.parseQuoteBlockedLine(line_str, return_raw=True)
 			if len(line) == 0:
 				continue
 			#print(line)
-			
+
 			# handle individual words (insert QC variable values, change slashes)
-			i = 0
-			for word in line:
-				for var in qc.vars.keys():
+			for i in range(len(line)):
+				word = line[i]
+				raw_word = raw_line[i]
+				for var, value in qc.vars.items():
 					kw = "${}$".format(var)
 					pos = word.lower().find(kw)
 					if pos != -1:
-						word = word.replace(word[pos:pos+len(kw)], qc.vars[var])			
+						word = word.replace(word[pos:pos+len(kw)], value.lower())
+					pos = raw_word.lower().find(kw)
+					if pos != -1:
+						raw_word = raw_word.replace(raw_word[pos:pos+len(kw)], value)
 				line[i] = word.replace("/","\\") # studiomdl is Windows-only
-				i += 1
-			
+				raw_line[i] = raw_word.replace("/","\\")
+
+			# the rest of a $sequence or $animation
+			if sequence:
+				if sequence.awaiting_brace and line[0] != "{":
+					self._finishQcSequence(sequence, doAnim) # it was a one-line definition, and this line is something else
+					sequence = None
+				else:
+					sequence.read(line, raw_line, qc.cd())
+					if sequence.finished:
+						self._finishQcSequence(sequence, doAnim)
+						sequence = None
+					continue
+
 			# Skip macros
 			if line[0] == "$definemacro":
 				self.warning(get_id("importer_qc_macroskip", True).format(filename))
 				while line[-1] == "\\\\":
 					line = self.parseQuoteBlockedLine( file.readline())
+				continue
 
 			# register new QC variable
 			if line[0] == "$definevariable":
-				qc.vars[line[1]] = line[2].lower()
+				qc.vars[line[1].lower()] = raw_line[2]
 				continue
 
 			# dir changes
@@ -989,45 +1022,69 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 			# remember where the model's materials live, for Link VMT Textures
 			if line[0] == "$cdmaterials" and len(line) > 1:
-				from .link_vmt import add_cdmaterial
-				add_cdmaterial(bpy.context.scene, line[1])
+				if not qc.harvest_only:
+					from .link_vmt import add_cdmaterial
+					add_cdmaterial(bpy.context.scene, line[1])
 				continue
 
 			# up axis
 			if line[0] == "$upaxis":
-				qc.upAxis = bpy.context.scene.vs.up_axis = line[1].upper()
-				qc.upAxisMat = getUpAxisMat(line[1])
+				if not qc.harvest_only:
+					qc.upAxis = bpy.context.scene.vs.up_axis = line[1].upper()
+					qc.upAxisMat = getUpAxisMat(line[1])
 				continue
-		
+
 			# bones in pure animation QCs
 			if line[0] == "$definebone":
-				pass # TODO
+				continue # TODO
 
-			def import_file(word_index,default_ext,smd_type,append='APPEND',layer=0,in_file_recursion = False):
+			# rig hints: IK chains and hit groups describe the character's limbs
+			if line[0] == "$ikchain" and len(line) > 2:
+				self._addIkChainHint(line, raw_line)
+				continue
+			if line[0] == "$hbox" and len(line) > 2:
+				try:
+					group = int(line[1])
+				except ValueError:
+					continue
+				if qc.include_depth == 0 or raw_line[2] not in qc.rig_hints["hitgroups"]:
+					qc.rig_hints["hitgroups"][raw_line[2]] = group
+				continue
+
+			def import_file(word_index,default_ext,smd_type,append='APPEND',group=None,in_file_recursion = False):
+				if qc.harvest_only:
+					return False
 				path = os.path.join( qc.cd(), appendExt(normalisePath(line[word_index]),default_ext) )
-				
+
 				if not in_file_recursion and not os.path.exists(path):
-					return import_file(word_index,"dmx",smd_type,append,layer,True)
+					return import_file(word_index,"dmx",smd_type,append,group,True)
 
 				if not path in qc.imported_smds: # FIXME: an SMD loaded once relatively and once absolutely will still pass this test
 					qc.imported_smds.append(path)
 					self.append = append if qc.a else 'NEW_ARMATURE'
 
 					# import the file
-					self.num_files_imported += (self.readDMX if path.endswith("dmx") else self.readSMD)(path,qc.upAxis,rotMode,False,smd_type,target_layer=layer)
-				return True
+					self.parentCollection = self._qcGroupCollection(group) if group else None
+					try:
+						imported = (self.readDMX if path.endswith("dmx") else self.readSMD)(path,qc.upAxis,rotMode,False,smd_type)
+					finally:
+						self.parentCollection = None
+					self.num_files_imported += imported
+					return bool(imported)
+				return False
 
 			# meshes
 			if line[0] in ["$body","$model"]:
 				import_file(2,"smd",REF)
 				continue
-			if line[0] == "$lod":
+			if line[0] in ["$lod","$shadowlod"]:
 				in_lod = True
-				lod += 1
+				lod_threshold = None if line[0] == "$shadowlod" else (line[1] if len(line) > 1 else "")
 				continue
 			if in_lod:
-				if line[0] == "replacemodel":
-					import_file(2,"smd",REF,'VALIDATE',layer=lod)
+				if line[0] == "replacemodel" and len(line) > 2:
+					if line[2] != "blank" and import_file(2,"smd",REF,'VALIDATE',group="lod"):
+						self._tagLodCollection(lod_threshold)
 					continue
 				if "}" in line:
 					in_lod = False
@@ -1043,59 +1100,26 @@ class SmdImporter(bpy.types.Operator, Logger):
 					in_bodygroup = False
 					continue
 
-			# skeletal animations
-			if in_sequence or (doAnim and line[0] in ["$sequence","$animation"]):
-				# there is no easy way to determine whether a SMD is being defined here or elsewhere, or even precisely where it is being defined
-				if not in_sequence:
-					seq_has_file = False
-				elif seq_has_file:
-					# multi-line block (as written by Crowbar): the file came first, everything
-					# after it (fps, loop, event, ikrule...) is option keywords until the block closes
-					if "}" in line:
-						in_sequence = False
-					continue
-				num_words_to_skip = 2 if not in_sequence else 0
-				for i in range(len(line)):
-					if num_words_to_skip:
-						num_words_to_skip -= 1
-						continue
-					if line[i] == "{":
-						in_sequence = True
-						continue
-					if line[i] == "}":
-						in_sequence = False
-						continue
-					if line[i] in ["hidden","autolay","realtime","snap","spline","xfade","delta","predelta"]:
-						continue
-					if line[i] in ["fadein","fadeout","addlayer","blendwidth","node"]:
-						num_words_to_skip = 1
-						continue
-					if line[i] in ["activity","transision","rtransition"]:
-						num_words_to_skip = 2
-						continue
-					if line[i] in ["blend"]:
-						num_words_to_skip = 3
-						continue
-					if line[i] in ["blendlayer"]:
-						num_words_to_skip = 5
-						continue
-					# there are many more keywords, but they can only appear *after* an SMD is referenced
-				
-					if not qc.a: qc.a = self.findArmature()
-					if not qc.a:
-						self.warning(get_id("qc_warn_noarmature", True).format(line_str.strip()))
-						continue
+			# skeletal animations: listed now, imported on demand (see anim_list.py)
+			if line[0] in ["$sequence","$animation"] and len(line) > 1:
+				sequence = _QcSequenceBlock(line[0], line[1], raw_line[1], source_qc)
+				start = 2
+				if line[0] == "$animation" and len(line) > 2 and line[2] not in ["{","}"]:
+					sequence.refs.append((line[2], raw_line[2], qc.cd()))
+					start = 3
+				sequence.read(line, raw_line, qc.cd(), start)
+				if sequence.depth <= 0:
+					if sequence.opened:
+						self._finishQcSequence(sequence, doAnim) # "{ ... }" on one line
+						sequence = None
+					else:
+						sequence.awaiting_brace = True # the block may start on the next line
+				continue
 
-					if line[i].lower() not in qc.animation_names:
-						if not qc.a.animation_data: qc.a.animation_data_create()
-						last_action = qc.a.animation_data.action
-						import_file(i,"smd",ANIM,'VALIDATE')
-						if line[0] == "$animation":
-							qc.animation_names.append(line[1].lower())
-					seq_has_file = True
-					if "}" in line[i+1:]:
-						in_sequence = False
-					break
+			# animations of other models, which this model can play
+			if line[0] == "$includemodel" and len(line) > 1:
+				if doAnim:
+					self._readIncludedModel(raw_line[1], filedir, doAnim, makeCamera, rotMode)
 				continue
 
 			# flex animation
@@ -1114,11 +1138,11 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 			# physics mesh
 			if line[0] in ["$collisionmodel","$collisionjoints"]:
-				import_file(1,"smd",PHYS,'VALIDATE',layer=10) # FIXME: what if there are >10 LODs?
+				import_file(1,"smd",PHYS,'VALIDATE',group="physics")
 				continue
 
 			# origin; this is where viewmodel editors should put their camera, and is in general something to be aware of
-			if line[0] == "$origin":
+			if line[0] == "$origin" and not qc.harvest_only:
 				if qc.makeCamera:
 					data = bpy.data.cameras.new(qc.jobName + "_origin")
 					name = "camera"
@@ -1158,16 +1182,18 @@ class SmdImporter(bpy.types.Operator, Logger):
 				path = os.path.join(qc.root_filedir,normalisePath(line[1])) # special case: ignores dir stack
 
 				if not path.endswith(".qc") and not path.endswith(".qci"):
-					if os.path.exists(appendExt(path,".qci")):
-						path = appendExt(path,".qci")
-					elif os.path.exists(appendExt(path,".qc")):
-						path = appendExt(path,".qc")
+					if os.path.exists(appendExt(path,"qci")):
+						path = appendExt(path,"qci")
+					elif os.path.exists(appendExt(path,"qc")):
+						path = appendExt(path,"qc")
 				try:
 					self.readQC(path,False, doAnim, makeCamera, rotMode)
 				except IOError:
 					self.warning(get_id("importer_err_qci", True).format(path))
 
 		file.close()
+		if sequence:
+			self._finishQcSequence(sequence, doAnim) # a one-line definition on the last line
 
 		if qc.origin:
 			qc.origin.parent = qc.a
@@ -1179,18 +1205,222 @@ class SmdImporter(bpy.types.Operator, Logger):
 					qc.origin.empty_display_size = size
 
 		if outer_qc:
+			self._resolveQcSequences()
+			self._finishQcAnimations(filepath, doAnim, rotMode)
 			printTimeMessage(qc.startTime,filename,"import","QC")
 		return self.num_files_imported
 
-	def initSMD(self, filepath,smd_type,upAxis,rotMode,target_layer):
+	def _addIkChainHint(self, line, raw_line):
+		qc = self.qc
+		knee = None
+		if "knee" in line:
+			i = line.index("knee")
+			try:
+				knee = [float(v) for v in line[i+1:i+4]]
+			except ValueError:
+				pass
+			if knee is not None and len(knee) != 3:
+				knee = None
+		hint = { "name": raw_line[1], "bone": raw_line[2], "knee": knee }
+		chains = qc.rig_hints["ikchains"]
+		existing = next((i for i, chain in enumerate(chains) if chain["name"].lower() == hint["name"].lower()), None)
+		if existing is None:
+			chains.append(hint)
+		elif qc.include_depth == 0: # the model's own chains win over those of included models
+			chains[existing] = hint
+
+	def _qcGroupCollection(self, kind : str):
+		"""The collection holding the model's LODs or physics meshes. It is excluded from the view layer at the end of the import."""
+		qc = self.qc
+		attr = "lod_collection" if kind == "lod" else "physics_collection"
+		collection = getattr(qc, attr)
+		if not collection:
+			name = get_id("importer_qc_lods" if kind == "lod" else "importer_qc_physics", data=True).format(os.path.splitext(qc.jobName)[0])
+			collection = bpy.data.collections.new(self.truncate_id_name(name, bpy.types.Collection))
+			bpy.context.scene.collection.children.link(collection)
+			setattr(qc, attr, collection)
+		return collection
+
+	def _tagLodCollection(self, threshold):
+		collection = self.smd.g
+		if not collection or collection == bpy.context.scene.collection:
+			return
+		if threshold is None:
+			collection["lod_shadow"] = True
+		else:
+			try:
+				collection["lod_threshold"] = float(threshold)
+			except ValueError:
+				pass
+
+	def _finishQcSequence(self, sequence : '_QcSequenceBlock', doAnim):
+		if not doAnim:
+			return
+		qc = self.qc
+		if sequence.keyword == "$animation":
+			record = None
+			if sequence.refs:
+				_, raw_ref, cd = sequence.refs[0]
+				record = self._qcAnimRecordForFile(raw_ref, cd, sequence.source_qc)
+			qc.anim_scope[sequence.name.lower()] = record # even if the file is missing, so that sequences don't take the name for a path
+			if record:
+				if sequence.raw_name != record.name:
+					record.add_user(sequence.raw_name)
+				self._applySequenceOptions(record, sequence)
+		else:
+			qc.pending_sequences.append(sequence)
+
+	def _resolveQcSequences(self):
+		"""Links the $sequences of the model being read to the files they play."""
+		qc = self.qc
+		for sequence in qc.pending_sequences:
+			single = len(sequence.refs) == 1
+			for word, raw_ref, cd in sequence.refs:
+				key = word.lower()
+				if key in qc.anim_scope:
+					record = qc.anim_scope[key]
+					direct_file = False
+				else:
+					record = self._qcAnimRecordForFile(raw_ref, cd, sequence.source_qc)
+					direct_file = True
+				if record:
+					record.add_user(sequence.raw_name)
+					if direct_file and single:
+						self._applySequenceOptions(record, sequence)
+		qc.pending_sequences = []
+
+	@staticmethod
+	def _applySequenceOptions(record : QcAnimRecord, sequence : '_QcSequenceBlock'):
+		if sequence.fps:
+			record.fps = sequence.fps
+		record.is_loop |= sequence.is_loop
+		record.is_delta |= sequence.is_delta
+		record.is_hidden |= sequence.is_hidden
+
+	def _qcAnimRecordForFile(self, ref : str, cd : str, source_qc : str) -> QcAnimRecord | None:
+		qc = self.qc
+		relative = _normaliseQcPath(ref)
+		path = os.path.join(cd, appendExt(relative, "smd"))
+		if not os.path.exists(path):
+			path = os.path.join(cd, appendExt(relative, "dmx"))
+			if not os.path.exists(path):
+				qc.missing_anim_files.append(os.path.join(cd, relative))
+				return None
+		key = _qcFileKey(path)
+		record = qc.anim_records.get(key)
+		if record is None:
+			path = os.path.normpath(path)
+			record = qc.anim_records[key] = QcAnimRecord(os.path.splitext(os.path.basename(path))[0], path, source_qc)
+		return record
+
+	def _resolveIncludedModel(self, mdl_path : str, qc_dir : str) -> str | None:
+		"""$includemodel names a compiled model. Look for a decompiled QC of it instead."""
+		relative = _normaliseQcPath(mdl_path)
+		stem = os.path.splitext(os.path.basename(relative))[0]
+		subdir = os.path.dirname(relative)
+		search_dirs = []
+		for folder in (qc_dir, self.qc.root_filedir, self.qc.outer_filedir, bpy.path.abspath(self.includeSearchPath) if self.includeSearchPath else None):
+			if folder and folder not in search_dirs:
+				search_dirs.append(folder)
+		for folder in search_dirs:
+			for candidate in (os.path.join(folder, subdir, stem + ".qc"), os.path.join(folder, stem + ".qc"), os.path.join(folder, stem, stem + ".qc")):
+				parent = os.path.dirname(candidate)
+				if os.path.isdir(parent): # match the name case-insensitively, and use its real case
+					wanted = os.path.basename(candidate).lower()
+					match = next((name for name in os.listdir(parent) if name.lower() == wanted), None)
+					if match:
+						return os.path.join(parent, match)
+		return None
+
+	def _readIncludedModel(self, mdl_path : str, qc_dir : str, doAnim, makeCamera, rotMode):
+		qc = self.qc
+		path = self._resolveIncludedModel(mdl_path, qc_dir)
+		if not path:
+			if mdl_path not in qc.unresolved_includes:
+				qc.unresolved_includes.append(mdl_path)
+			return
+		key = _qcFileKey(path)
+		if key in qc.visited_qcs:
+			return
+		if qc.include_depth >= 8:
+			self.warning(get_id("importer_qc_includemodel_depth", True).format(mdl_path))
+			return
+		qc.visited_qcs.add(key)
+		print("- $includemodel \"{}\": reading {}".format(mdl_path, path))
+
+		# an included model is a separate compile, with its own folder, variables and animation names
+		saved = (qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences)
+		qc.root_filedir = os.path.dirname(path)
+		qc.dir_stack = []
+		qc.vars = {}
+		qc.in_block_comment = False
+		qc.harvest_only = True
+		qc.anim_scope = {}
+		qc.pending_sequences = []
+		qc.include_depth += 1
+		try:
+			self.readQC(path, False, doAnim, makeCamera, rotMode)
+			self._resolveQcSequences()
+		except IOError:
+			self.warning(get_id("importer_err_qci", True).format(path))
+		finally:
+			qc.include_depth -= 1
+			(qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences) = saved
+
+	def _finishQcAnimations(self, filepath, doAnim, rotMode):
+		"""Lists the QC's animations on its armature, and builds the rig."""
+		qc = self.qc
+		for include in qc.unresolved_includes:
+			self.warning(get_id("importer_qc_includemodel_missing", True).format(include))
+		if qc.missing_anim_files:
+			self.warning(get_id("importer_qc_anims_missing", True).format(len(qc.missing_anim_files)))
+			for path in qc.missing_anim_files:
+				print("  - missing:", path)
+
+		records = list(qc.anim_records.values()) if doAnim else []
+		if records and not qc.a:
+			qc.a = self.findArmature()
+
+		loaded = {}
+		if records and not qc.a and not qc.harvest_only:
+			# an animation-only QC: the first animation provides the skeleton
+			first = records[0]
+			self.append = 'NEW_ARMATURE'
+			if (self.readDMX if first.filepath.lower().endswith(".dmx") else self.readSMD)(first.filepath, qc.upAxis, rotMode, False, ANIM):
+				self.num_files_imported += 1
+				qc.a = qc.a or self.smd.a
+				slot = self.smd.created_slot
+				loaded[first.filepath] = (self.smd.created_action, slot.handle if slot else -1, self.smd.num_frames)
+
+		arm = qc.a
+		if not arm or arm.type != 'ARMATURE':
+			return
+
+		import json
+		from . import anim_list
+		arm.data.vs.rig_hints = json.dumps(qc.rig_hints)
+		if records or qc.unresolved_includes:
+			anim_list.store_records(arm, records, loaded, qc_path=os.path.realpath(filepath), rot_mode=rotMode, up_axis=qc.upAxis,
+						   search_path=self.includeSearchPath, unresolved_includes=qc.unresolved_includes)
+			print("- Listed {} animations on \"{}\"".format(len(records), arm.name))
+			self.num_anims_listed = getattr(self, "num_anims_listed", 0) + len(records)
+			if records and not self.lazyAnims and not qc.harvest_only:
+				anim_list.load_items(bpy.context, arm, [i for i, item in enumerate(arm.vs.qc_anims) if not anim_list.is_loaded(item)], logger=self)
+
+		if self.generateRig and not qc.harvest_only:
+			from . import rig
+			rig.generate_rig(arm, qc.rig_hints, logger=self, only_if_found=True)
+
+	def initSMD(self, filepath,smd_type,upAxis,rotMode):
 		smd = self.smd = SmdInfo(os.path.splitext(os.path.basename(filepath))[0])
 		smd.jobType = smd_type
 		smd.startTime = time.time()
-		smd.layer = target_layer
 		smd.rotMode = rotMode
 		if self.qc:
 			smd.upAxis = self.qc.upAxis
 			smd.a = self.qc.a
+		if self.target_armature:
+			smd.a = self.target_armature
 		if upAxis:
 			smd.upAxis = upAxis
 
@@ -1198,15 +1428,15 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 	def createCollection(self):
 		if self.smd.jobType and self.smd.jobType != ANIM:
-			if self.createCollections:
+			if self.createCollections or self.parentCollection:
 				self.smd.g = bpy.data.collections.new(self.smd.jobName)
-				bpy.context.scene.collection.children.link(self.smd.g)
+				(self.parentCollection or bpy.context.scene.collection).children.link(self.smd.g)
 			else:
 				self.smd.g = bpy.context.scene.collection
 
 	# Parses an SMD file
-	def readSMD(self, filepath, upAxis, rotMode, newscene = False, smd_type = None, target_layer = 0):
-		smd = self.initSMD(filepath,smd_type,upAxis,rotMode,target_layer)
+	def readSMD(self, filepath, upAxis, rotMode, newscene = False, smd_type = None):
+		smd = self.initSMD(filepath,smd_type,upAxis,rotMode)
 		self.appliedReferencePose = False
 
 		try:
@@ -1217,15 +1447,15 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 		if newscene:
 			bpy.context.screen.scene = bpy.data.scenes.new(smd.jobName) # BLENDER BUG: this currently doesn't update bpy.context.scene
-		elif bpy.context.scene.name == pgettext("Scene"):
+		elif self.modifyScene and bpy.context.scene.name == pgettext("Scene"):
 			bpy.context.scene.name = smd.jobName
 
 		print("\nSMD IMPORTER: now working on",smd.jobName)
-		
+
 		while True:
 			header = self.parseQuoteBlockedLine(file.readline())
 			if header: break
-		
+
 		if header != ["version" ,"1"]:
 			self.warning (get_id("importer_err_smd_ver"))
 
@@ -1244,19 +1474,18 @@ class SmdImporter(bpy.types.Operator, Logger):
 
 		return 1
 
-	def readDMX(self, filepath, upAxis, rotMode,newscene = False, smd_type = None, target_layer = 0):
-		smd = self.initSMD(filepath,smd_type,upAxis,rotMode,target_layer)
+	def readDMX(self, filepath, upAxis, rotMode,newscene = False, smd_type = None):
+		smd = self.initSMD(filepath,smd_type,upAxis,rotMode)
 		smd.isDMX = 1
 
 		bench = BenchMarker(1,"DMX")
-		
-		target_arm = self.findArmature() if self.append != 'NEW_ARMATURE' else None
+
+		target_arm = (self.target_armature or self.findArmature()) if self.append != 'NEW_ARMATURE' else None
 		if target_arm:
 			smd.a = target_arm
-		
+
 		ob = bone = smd.atch = None
-		smd.layer = target_layer
-		if bpy.context.active_object: ops.object.mode_set(mode='OBJECT')
+		if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT': ops.object.mode_set(mode='OBJECT')
 		self.appliedReferencePose = False
 		
 		print( "\nDMX IMPORTER: now working on",os.path.basename(filepath) )	
@@ -1270,7 +1499,7 @@ class SmdImporter(bpy.types.Operator, Logger):
 				return 0
 			bench.report("Load DMX")
 
-			if bpy.context.scene.name.startswith("Scene"):
+			if self.modifyScene and bpy.context.scene.name.startswith("Scene"):
 				bpy.context.scene.name = smd.jobName
 
 			keywords = getDmxKeywords(dm.format_ver)
@@ -1710,17 +1939,20 @@ class SmdImporter(bpy.types.Operator, Logger):
 				if smd.a == None:
 					self.warning(get_id("importer_err_noanimationbones", True).format(smd.jobName))
 				else:
-					smd.a.hide_set(False)
-					bpy.context.view_layer.objects.active = smd.a
+					if self.modifyScene:
+						smd.a.hide_set(False)
+						bpy.context.view_layer.objects.active = smd.a
 					if unknown_bones:
 						self.warning(get_id("importer_err_missingbones", True).format(smd.jobName,len(unknown_bones),smd.a.name))
 
 					total_frames = ceil((duration * frameRate) if duration else lastFrameIndex) + 1 # need a frame for 0 too!
-				
+
 					# apply the keframes
 					self.applyFrames(keyframes,total_frames)
+					if smd.a.mode != 'OBJECT' and bpy.context.view_layer.objects.active == smd.a:
+						ops.object.mode_set(mode='OBJECT') # the skeleton was matched in edit mode
 
-					bpy.context.scene.frame_end += int(round(start * 2 * frameRate,0))
+					smd.num_frames += int(round(start * 2 * frameRate,0)) # the scene's frame range is set from this
 
 		except datamodel.AttributeError as e:
 			e.args = ["Invalid DMX file: {}".format(e.args[0] if e.args else "Unknown error")]
@@ -1735,3 +1967,157 @@ class SmdImporter(bpy.types.Operator, Logger):
 			bpy.context.scene.vs.dmx_format = version.format_enum
 		if State.datamodelEncoding < version.encoding:
 			bpy.context.scene.vs.dmx_encoding = str(version.encoding)
+
+
+class SmdImporter(bpy.types.Operator, SmdImportCore):
+	bl_idname = "import_scene.smd"
+	bl_label = get_id("importer_title")
+	bl_description = get_id("importer_tip")
+	bl_options = {'UNDO', 'PRESET'}
+
+	# Properties used by the file browser
+	filepath : StringProperty(name="File Path", description="File filepath used for importing the SMD/VTA/DMX/QC file", maxlen=1024, default="", options={'HIDDEN'})
+	files : CollectionProperty(type=bpy.types.OperatorFileListElement, options={'HIDDEN'})
+	directory : StringProperty(maxlen=1024, default="", subtype='FILE_PATH', options={'HIDDEN'})
+	filter_folder : BoolProperty(name="Filter Folders", description="", default=True, options={'HIDDEN'})
+	filter_glob : StringProperty(default="*.smd;*.vta;*.dmx;*.qc;*.qci", options={'HIDDEN'})
+
+	# Custom properties
+	doAnim : BoolProperty(name=get_id("importer_doanims"), default=True)
+	lazyAnims : BoolProperty(name=get_id("importer_lazyanims"), description=get_id("importer_lazyanims_tip"), default=True)
+	includeSearchPath : StringProperty(name=get_id("importer_includemodel_path"), description=get_id("importer_includemodel_path_tip"), subtype='DIR_PATH', default="")
+	generateRig : BoolProperty(name=get_id("importer_generate_rig"), description=get_id("importer_generate_rig_tip"), default=True)
+	createCollections : BoolProperty(name=get_id("importer_use_collections"), description=get_id("importer_use_collections_tip"), default=True)
+	makeCamera : BoolProperty(name=get_id("importer_makecamera"),description=get_id("importer_makecamera_tip"),default=False)
+	append : EnumProperty(name=get_id("importer_bones_mode"),description=get_id("importer_bones_mode_desc"),items=(
+		('VALIDATE',get_id("importer_bones_validate"),get_id("importer_bones_validate_desc")),
+		('APPEND',get_id("importer_bones_append"),get_id("importer_bones_append_desc")),
+		('NEW_ARMATURE',get_id("importer_bones_newarm"),get_id("importer_bones_newarm_desc"))),
+		default='APPEND')
+	upAxis : EnumProperty(name="Up Axis",items=axes,default='Z',description=get_id("importer_up_tip"))
+	rotMode : EnumProperty(name=get_id("importer_rotmode"),items=( ('XYZ', "Euler", ''), ('QUATERNION', "Quaternion", "") ),default='XYZ',description=get_id("importer_rotmode_tip"))
+	boneMode : EnumProperty(name=get_id("importer_bonemode"),items=(('NONE','Default',''),('ARROWS','Arrows',''),('SPHERE','Sphere','')),default='SPHERE',description=get_id("importer_bonemode_tip"))
+	
+	def __init__(self, *args, **kwargs):
+		bpy.types.Operator.__init__(self, *args, **kwargs)
+		Logger.__init__(self)
+
+	def execute(self, context):
+		with State.suspend_updates(): # don't rebuild the export list after every file
+			result = self._import(context)
+		State.update_scene(context.scene)
+		return result
+
+	def _import(self, context):
+		pre_obs = set(bpy.context.scene.objects)
+		pre_eem = context.preferences.edit.use_enter_edit_mode
+		pre_append = self.append
+		context.preferences.edit.use_enter_edit_mode = False
+
+		self.existingBones = [] # bones which existed before importing began
+		self.num_files_imported = 0
+		self.num_anims_listed = 0
+		excluded_collections = []
+
+		for filepath in [os.path.join(self.directory,file.name) for file in self.files] if self.files else [self.filepath]:
+			filepath_lc = filepath.lower()
+			if filepath_lc.endswith('.qc') or filepath_lc.endswith('.qci'):
+				self.num_files_imported = self.readQC(filepath, False, self.doAnim, self.makeCamera, self.rotMode, outer_qc=True)
+				excluded_collections.extend(c for c in (self.qc.lod_collection, self.qc.physics_collection) if c)
+				if self.qc.a:
+					bpy.context.view_layer.objects.active = self.qc.a
+			elif filepath_lc.endswith('.smd'):
+				self.num_files_imported = self.readSMD(filepath, self.upAxis, self.rotMode)
+			elif filepath_lc.endswith ('.vta'):
+				self.num_files_imported = self.readSMD(filepath, self.upAxis, self.rotMode, smd_type=FLEX)
+			elif filepath_lc.endswith('.dmx'):
+				self.num_files_imported = self.readDMX(filepath, self.upAxis, self.rotMode)
+			else:
+				if len(filepath_lc) == 0:
+					self.report({'ERROR'},get_id("importer_err_nofile"))
+				else:
+					self.report({'ERROR'},get_id("importer_err_badfile", True).format(os.path.basename(filepath)))
+
+			self.append = pre_append
+
+		# LODs and physics meshes stay in the file, but are left out of the view layer
+		for collection in excluded_collections:
+			layer_collection = _findLayerCollection(context.view_layer.layer_collection, collection)
+			if layer_collection:
+				layer_collection.exclude = True
+
+		if self.num_anims_listed:
+			message = get_id("importer_complete_anims", True).format(self.num_files_imported,self.num_anims_listed,self.elapsed_time())
+		else:
+			message = get_id("importer_complete", True).format(self.num_files_imported,self.elapsed_time())
+		self.errorReport(message)
+		if self.num_files_imported:
+			ops.object.select_all(action='DESELECT')
+			view_obs = set(context.view_layer.objects)
+			new_obs = set(bpy.context.scene.objects).difference(pre_obs).intersection(view_obs)
+			xy = xyz = 0
+			for ob in new_obs:
+				ob.select_set(True)
+				# FIXME: assumes meshes are centered around their origins
+				xy = max(xy, int(max(ob.dimensions[0],ob.dimensions[1])) )
+				xyz = max(xyz, max(xy,int(ob.dimensions[2])))
+			active = self.qc.a if self.qc else self.smd.a
+			if active in view_obs:
+				bpy.context.view_layer.objects.active = active
+			for area in context.screen.areas:
+				if area.type == 'VIEW_3D':
+					area.spaces.active.clip_end = max( area.spaces.active.clip_end, xyz * 2 )
+		if bpy.context.area and bpy.context.area.type == 'VIEW_3D' and bpy.context.region:
+			ops.view3d.view_selected()
+
+		# an animation file imported on its own: play it
+		smd = getattr(self, "smd", None)
+		if not self.qc and smd and smd.jobType == ANIM and smd.num_frames:
+			context.scene.frame_start = 0
+			context.scene.frame_end = max(0, smd.num_frames - 1)
+			context.scene.frame_set(0)
+
+		context.preferences.edit.use_enter_edit_mode = pre_eem
+		self.append = pre_append
+
+		return {'FINISHED'}
+
+	def invoke(self, context, event):
+		self.upAxis = context.scene.vs.up_axis
+		bpy.context.window_manager.fileselect_add(self)
+		return {'RUNNING_MODAL'}
+
+class AnimLoader(SmdImportCore):
+	"""Imports animation files into an existing armature, for the QC animation list. Unlike the import operator it
+	leaves the viewport, the selection, the object mode and the scene alone."""
+	def __init__(self, armature : bpy.types.Object | None, rotMode = 'XYZ', upAxis = None, action : bpy.types.Action | None = None, assign_slot = True):
+		Logger.__init__(self)
+		self.target_armature = armature
+		self.target_action = action
+		self.assign_slot = assign_slot
+		self.modifyScene = False
+		self.append = 'VALIDATE'
+		self.boneMode = 'NONE'
+		self.createCollections = False
+		self.rotMode = rotMode
+		self.upAxis = upAxis or bpy.context.scene.vs.up_axis
+		self.existingBones = []
+		self.num_files_imported = 0
+		self.lazyAnims = True
+
+	def report(self, type, message):
+		print(message)
+
+	def load(self, filepath : str) -> SmdInfo | None:
+		"""Returns the SmdInfo of the imported animation, which holds the new action, slot and frame count."""
+		self.append = 'VALIDATE'
+		read = self.readDMX if filepath.lower().endswith(".dmx") else self.readSMD
+		try:
+			imported = read(filepath, self.upAxis, self.rotMode, False, ANIM)
+		except Exception as err:
+			self.error(get_id("importer_err_smd", True).format(os.path.basename(filepath), err))
+			return None
+		if imported and self.smd.created_action:
+			self.num_files_imported += 1
+			return self.smd
+		return None

@@ -109,6 +109,17 @@ Either field may point at the folder that contains `materials\`, at `materials\`
 
 Materials that already have an Image Texture node are left alone unless **Overwrite** is ticked. Anything that couldn't be resolved (VMT not found, PNG not found) is listed in a popup and in the System Console.
 
+## Importing a character from a QC
+
+Importing a QC such as a decompiled `police.qc` brings in only what you need to work on the model:
+
+- **LODs and physics** (`$lod`, `$shadowlod`, `$collisionmodel`/`$collisionjoints`) are imported into `<model> LODs` and `<model> Physics` collections, which are excluded from the view layer. Tick them in the Outliner to see them or to export them. Each LOD collection records its `$lod` distance in the `lod_threshold` custom property.
+- **Animations are listed, not imported.** The `$sequence`/`$animation` files of the QC, and of the models it names with `$includemodel`, appear in **3D View > Sidebar > Source > QC Animations**. Click the import icon of an animation to load it, which also plays it: it becomes a slot of the armature's action, and the scene's frame range and frame rate follow it. **Load Shown** imports everything the filter shows (Esc stops it). The filter also matches sequence names, so searching `walk_all` finds the `a_Walk*` animations it blends.
+- **`$includemodel`** names a compiled `.mdl`. The importer looks for a decompiled QC with the same name next to the QC (or in `<name>/<name>.qc`), then in the **$includemodel Folder** chosen in the import options. If one isn't found, the panel says so; pick the folder and click **Rescan QC**.
+- **IK rig.** Characters get IK controls for their arms and legs. The limbs come from the QC's `$ikchain` lines, falling back to its `$hbox` hit groups and then to ValveBiped bone names. The deforming skeleton isn't changed. Each limb has an **IK/FK** slider in the **IK Rig** panel: 0 plays the imported keyframes, 1 follows the `<limb>_ik` and `<limb>_pole` controls. **Snap IK to FK** moves the controls onto the current pose, **Snap FK to IK** does the reverse, and **Bake Animation to IK** keys the controls on every frame so an imported animation can be edited with IK. The rig's bones are never exported, and exported animations contain the IK result.
+
+To import everything up front as before, untick **List Animations Only** in the import options. Imports are also much faster than they were: loading all 1,391 police animations takes about 17 seconds, where 964 of them used to take over two minutes.
+
 ## Repository layout
 
 ```
@@ -122,7 +133,11 @@ io_scene_valvesource/   the add-on itself (this folder is what gets zipped/insta
   update.py                built-in "check for update" operator (see note below)
   utils.py                 shared helpers
   link_vmt.py              "Link VMT Textures": assigns VMT/$basetexture images to imported materials
+  anim_list.py             the QC animation list: on-demand animation import, "Source" sidebar panel
+  rig.py                   IK rig generation and IK/FK snapping
 Tests/                   unit tests, run against Blender-as-a-Python-module
+  run_in_blender.py        runs the tests inside an installed Blender instead
+  bench_qc_import.py       times a QC import and counts what it created
 scripts/
   sync_to_blender.ps1      deploys io_scene_valvesource/ into a local Blender install
   set_dev_defaults.ps1     writes machine-specific path defaults (Export/Engine/Game/Material/VMT) (gitignored)
@@ -158,6 +173,12 @@ python -m unittest discover -s Tests
 ```
 
 Some tests additionally compare against Source SDK content and only run if the `SOURCESDK` environment variable is set.
+
+To run them in an installed Blender instead (the repository takes precedence over any installed copy of the add-on), optionally filtering by test name:
+
+```
+blender -b --factory-startup --python Tests/run_in_blender.py -- [QcImport Rig_ ...]
+```
 
 ## Compatibility
 
