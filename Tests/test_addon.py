@@ -50,13 +50,14 @@ def _biped_walk_frame(t):
 	pose[2][1][2] = 0.1 + 0.4 * (1 + math.sin(t)) / 2
 	return pose
 
-def _write_biped_smd(path, frames, triangles = False):
+def _write_biped_smd(path, frames, triangles = False, bones = None):
+	"""bones: the indices of the bones which the frames key, if not all of them."""
 	lines = ["version 1", "nodes"]
 	lines += ['{} "{}" {}'.format(i, name, parent) for i, (name, parent, _, _) in enumerate(_biped_bones)]
 	lines += ["end", "skeleton"]
 	for f, pose in enumerate(frames):
 		lines.append("time {}".format(f))
-		lines += ["{} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f}".format(i, *pos, *rot) for i, (pos, rot) in enumerate(pose)]
+		lines += ["{} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f}".format(bones[i] if bones else i, *pos, *rot) for i, (pos, rot) in enumerate(pose)]
 	lines.append("end")
 	if triangles:
 		lines.append("triangles")
@@ -86,6 +87,12 @@ $collisionmodel "biped_phys.smd" {
 }
 $ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0
 $hbox 6 "ValveBiped.Bip01_L_Thigh" 0 0 0 1 1 1
+$includemodel "biped_gestures.mdl"
+$poseparameter "move_yaw" -180 180 loop 360
+$poseparameter "aim_yaw" -45 45
+$poseparameter "aim_pitch" -45 45
+$declaresequence "late"
+$declaresequence "never"
 $animation "a_walk" "anims\\walk.smd" {
 	fps 24
 }
@@ -107,8 +114,43 @@ $sequence "jump"
 }
 /* $sequence "commented" "anims\\commented.smd" */
 $sequence "missing" "anims\\does_not_exist.smd"
+$animation "a_lean_left" "anims\\lean_left.smd"
+$animation "a_lean_center" "anims\\lean_center.smd"
+$animation "a_lean_right" "anims\\lean_right.smd"
+$sequence "lean" {
+	"a_lean_left" "a_lean_center" "a_lean_right"
+	blend "move_yaw" -90 90
+	blendwidth 3
+}
+$sequence "aim" {
+	"anims\\aim_00.smd"
+	"anims\\aim_10.smd"
+	"anims\\aim_01.smd"
+	"anims\\aim_11.smd"
+	blend "aim_yaw" -45 45
+	blend "aim_pitch" -45 45
+}
+$animation "@gesture_corrective" "anims\\gesture_corrective.smd"
+$sequence "gesture" {
+	"anims\\gesture.smd"
+	delta
+	subtract "@gesture_corrective" 0
+	hidden
+}
+$sequence "gesture_pre" {
+	"anims\\gesture.smd"
+	predelta
+	presubtract "@gesture_corrective" 0
+}
 $includemodel "biped_anims.mdl"
 $includemodel "not_decompiled.mdl"
+"""
+
+# An $includemodel QC which the model above names before its own sequences. The engine still lists the model's own
+# sequences first: "late" fills the model's placeholder, and "idle" is a duplicate which is ignored.
+_biped_gestures_qc = """$modelname "biped_gestures.mdl"
+$sequence "late" "anims\\idle.smd" fps 15
+$sequence "idle" "anims\\jump.smd"
 """
 
 # An $includemodel QC. It has its own "a_walk", includes the model above (a cycle), and its meshes must be ignored.
@@ -443,10 +485,30 @@ class _AddonTests():
 		_write_biped_smd(join(folder, "anims", "idle.smd"), [_biped_rest] * 5)
 		_write_biped_smd(join(folder, "anims", "jump.smd"), [_biped_walk_frame(t) for t in range(3)])
 		_write_biped_smd(join(folder, "anims", "walk_other.smd"), [_biped_walk_frame(-t) for t in range(4)])
+		for name, offset in (("left", -0.4), ("center", 0), ("right", 0.4)):
+			_write_biped_smd(join(folder, "anims", "lean_{}.smd".format(name)), [self._bipedPose(thigh_y=math.pi / 2 + offset)] * 2)
+		for x in (0, 1):
+			for y in (0, 1):
+				_write_biped_smd(join(folder, "anims", "aim_{}{}.smd".format(x, y)), [self._bipedPose(pelvis=(x * 10, y * 10, 40))])
+		# a Crowbar-style delta: raw offsets, and a corrective animation which only keys the root
+		_write_biped_smd(join(folder, "anims", "gesture.smd"), [self.gesture_delta] * 3)
+		_write_biped_smd(join(folder, "anims", "gesture_corrective.smd"), [[((0, 0, 0), (0, 0, 0.3))]], bones=[0])
 		with open(join(folder, "biped.qc"), "w") as f: f.write(_biped_qc)
 		with open(join(folder, "biped_anims.qc"), "w") as f: f.write(_biped_anims_qc)
+		with open(join(folder, "biped_gestures.qc"), "w") as f: f.write(_biped_gestures_qc)
 		self.biped_folder = folder
 		return join(folder, "biped.qc")
+
+	gesture_delta = [((0.5, 0, 0), (0, 0, 0.3)), ((0, 0, 0), (0.4, 0, 0))] + [((0, 0, 0), (0, 0, 0))] * (len(_biped_bones) - 2)
+
+	@staticmethod
+	def _bipedPose(pelvis = None, thigh_y = None):
+		pose = [list(map(list, bone)) for bone in _biped_rest]
+		if pelvis is not None:
+			pose[0][0] = list(pelvis)
+		if thigh_y is not None:
+			pose[1][1][1] = thigh_y
+		return pose
 
 	def _importBipedQc(self, **kwargs):
 		qc = self._setupBipedQc()
@@ -504,34 +566,67 @@ class _AddonTests():
 		self.assertNotIn("biped_lod1", view_objects)
 		self.assertNotIn("biped_phys", view_objects)
 
-	def test_QcImport_ListsAnimationsLazily(self):
+	def test_QcImport_ListsSequences(self):
 		arm = self._importBipedQc()
 		bpy = self.bpy
-		anims = { item.name: item for item in arm.vs.qc_anims }
-		self.assertEqual(set(anims), {"walk", "idle", "jump", "walk_other"}) # not "commented", not the missing file
-		self.assertEqual(len(bpy.data.actions), 0, "animations must only be listed")
+		vs = arm.vs
+		# the model's own sequences first, then those of its $includemodels, in order. Not "commented", not the one whose
+		# file is missing, not the placeholder which no model defines.
+		self.assertEqual([item.name for item in vs.qc_anims], ["late", "walk_all", "idle", "jump", "lean", "aim", "gesture", "gesture_pre", "run"])
+		self.assertEqual(len(bpy.data.actions), 0, "sequences must only be listed")
+		seqs = { item.name: item for item in vs.qc_anims }
 
-		walk = anims["walk"]
+		walk = seqs["walk_all"]
 		self.assertEqual(walk.source_qc, "biped")
+		self.assertEqual([(c.name, os.path.basename(c.filepath), c.fps) for c in walk.components], [("a_walk", "walk.smd", 24)])
 		self.assertEqual(walk.fps, 24)
-		self.assertIn("a_walk", walk.used_by)
-		self.assertIn("walk_all", walk.used_by)
-		self.assertTrue(anims["idle"].is_loop)
-		self.assertEqual(anims["idle"].fps, 30)
-		self.assertIn("jump", anims["jump"].used_by)
+		self.assertTrue(walk.is_loop)
+		self.assertFalse(self.anim_list.needs_compose(walk), "a blend of one animation plays it as it is")
+
+		# a placeholder is filled by the included model; the included model's "idle" doesn't replace the model's
+		self.assertEqual(seqs["late"].source_qc, "biped_gestures")
+		self.assertEqual(seqs["late"].fps, 15)
+		self.assertEqual(os.path.basename(seqs["idle"].components[0].filepath), "idle.smd")
+		self.assertTrue(seqs["idle"].is_loop)
+		self.assertEqual(seqs["idle"].fps, 30)
+		self.assertEqual(seqs["jump"].activity, "ACT_JUMP")
 
 		# the included model's "a_walk" is its own file
-		self.assertEqual(anims["walk_other"].source_qc, "biped_anims")
-		self.assertIn("run", anims["walk_other"].used_by)
-		self.assertNotIn("run", walk.used_by)
+		self.assertEqual(seqs["run"].source_qc, "biped_anims")
+		self.assertEqual(os.path.basename(seqs["run"].components[0].filepath), "walk_other.smd")
 
-		# included models only contribute animations
+		lean = seqs["lean"]
+		self.assertEqual([c.name for c in lean.components], ["a_lean_left", "a_lean_center", "a_lean_right"])
+		self.assertEqual(self.anim_list.blend_size(lean), (3, 1))
+		self.assertEqual(self.anim_list.blend_params(lean), [("move_yaw", -90, 90)])
+		self.assertEqual(self.anim_list.blend_size(seqs["aim"]), (2, 2)) # square, without blendwidth
+		self.assertEqual([p.name for p in seqs["aim"].blend_params], ["aim_yaw", "aim_pitch"])
+
+		gesture = seqs["gesture"]
+		self.assertTrue(gesture.is_delta and gesture.is_post and gesture.is_hidden)
+		self.assertEqual(os.path.basename(gesture.components[0].subtract_filepath), "gesture_corrective.smd")
+		self.assertTrue(gesture.components[0].subtract_post)
+		pre = seqs["gesture_pre"]
+		self.assertTrue(pre.is_delta)
+		self.assertFalse(pre.is_post or pre.components[0].subtract_post)
+
+		self.assertEqual({p.name: (p.min_value, p.max_value, p.value) for p in vs.qc_pose_params},
+			{"move_yaw": (-180, 180, 0), "aim_yaw": (-45, 45, 0), "aim_pitch": (-45, 45, 0)})
+
+		# included models only contribute sequences
 		self.assertNotIn("biped_ref.001", bpy.data.objects)
 		self.assertNotIn("should_not_be_registered", bpy.context.scene.vs.vmt_cdmaterials)
-		self.assertEqual(arm.vs.qc_missing_includes, "not_decompiled.mdl")
+		self.assertEqual(vs.qc_missing_includes, "not_decompiled.mdl")
 
-		arm.vs.qc_anims_filter = "walk_all"
-		self.assertEqual(self.anim_list.filtered_indices(arm.vs), [self._qcAnimIndex(arm, "walk")])
+		# deltas are hidden until asked for; the filter matches activities and the animations sequences play
+		index = lambda name: self._qcAnimIndex(arm, name)
+		self.assertEqual(self.anim_list.filtered_indices(vs), [index(n) for n in ("late", "walk_all", "idle", "jump", "lean", "aim", "run")])
+		vs.qc_anims_show_delta = True
+		self.assertEqual(len(self.anim_list.filtered_indices(vs)), 9)
+		vs.qc_anims_filter = "a_lean"
+		self.assertEqual(self.anim_list.filtered_indices(vs), [index("lean")])
+		vs.qc_anims_filter = "act_jump"
+		self.assertEqual(self.anim_list.filtered_indices(vs), [index("jump")])
 
 		import json
 		hints = json.loads(arm.data.vs.rig_hints)
@@ -542,7 +637,7 @@ class _AddonTests():
 		arm = self._importBipedQc(generateRig=False)
 		bpy = self.bpy
 		scene = bpy.context.scene
-		index = self._qcAnimIndex(arm, "walk")
+		index = self._qcAnimIndex(arm, "walk_all")
 		self.assertEqual(bpy.ops.smd.qc_anim_load(index=index), {'FINISHED'})
 
 		item = arm.vs.qc_anims[index]
@@ -583,8 +678,142 @@ class _AddonTests():
 
 	def test_QcImport_EagerAnimations(self):
 		arm = self._importBipedQc(lazyAnims=False, generateRig=False)
-		self.assertTrue(all(self.anim_list.is_loaded(item) for item in arm.vs.qc_anims))
-		self.assertEqual(len(arm.vs.qc_action.slots), 4)
+		self.assertEqual([item.name for item in arm.vs.qc_anims if self.anim_list.is_loaded(item)], ["late", "walk_all", "idle", "jump", "lean", "aim", "run"])
+		self.assertEqual(len(arm.vs.qc_action.slots), 7) # not the deltas
+
+	def _expectedFromLocals(self, locals):
+		"""Armature space matrices of the synthetic leg from each bone's matrix relative to its parent."""
+		matrices = []
+		for (_, parent, _, _), local in zip(_biped_bones, locals):
+			matrices.append(matrices[parent] @ local if parent >= 0 else local)
+		return { bone[0]: matrix for bone, matrix in zip(_biped_bones, matrices) }
+
+	def _poseLocals(self, pose):
+		from mathutils import Matrix, Euler
+		return [Matrix.Translation(pos) @ Euler(rot).to_matrix().to_4x4() for pos, rot in pose]
+
+	def _assertPose(self, arm, expected, msg):
+		self.bpy.context.view_layer.update()
+		for name, matrix in expected.items():
+			self.assertMatricesAlmostEqual(arm.pose.bones[name].matrix, matrix, msg="{}: {}".format(msg, name))
+
+	def _skipWithoutSlots(self):
+		if not import_module("io_scene_valvesource").utils.State.useActionSlots:
+			self.skipTest("delta and blend sequences are composed in Blender 4.4+")
+
+	def test_QcCompose_Math(self):
+		self._skipWithoutSlots()
+		from mathutils import Vector, Quaternion
+		qc_compose = import_module("io_scene_valvesource").qc_compose
+		a = (Vector((1, 2, 3)), Quaternion((1, 0, 0), 0.7))
+		b = (Vector((0.5, 0, 1)), Quaternion((0, 1, 0), 0.4))
+		for post in (True, False):
+			loc, rot = qc_compose.apply_delta(b, qc_compose.subtract(a, b, post), post)
+			self.assertAlmostEqual((loc - a[0]).length, 0, places=5)
+			self.assertAlmostEqual(abs(rot.dot(a[1])), 1, places=5)
+		self.assertLess(abs(qc_compose.subtract(a, b, True)[1].dot(qc_compose.subtract(a, b, False)[1])), 0.9999, "pre and post deltas differ")
+
+		self.assertEqual(qc_compose.blend_grid(9, 9, 1), (9, 1))
+		self.assertEqual(qc_compose.blend_grid(9, 0, 2), (3, 3))
+		self.assertEqual(qc_compose.blend_grid(12, 3, 2), (3, 4))
+		self.assertEqual(qc_compose.blend_grid(3, 0, 1), (3, 1))
+		self.assertEqual(qc_compose.blend_axis(0, -180, 180, 9), (4, 0))
+		self.assertEqual(qc_compose.blend_axis(180, -180, 180, 9), (7, 1))
+		self.assertEqual(qc_compose.blend_axis(-500, -180, 180, 9), (0, 0))
+		self.assertEqual(qc_compose.blend_axis(0.25, 0, 1, 2), (0, 0.25))
+		weights = qc_compose.blend_weights(4, 2, [("x", -1, 1), ("y", -1, 1)], {"x": 0.5, "y": -1})
+		self.assertEqual(sorted(weights), [(0, 0.25), (1, 0.75)])
+
+	def test_QcImport_DeltaOnRest(self):
+		self._skipWithoutSlots()
+		from mathutils import Matrix
+		arm = self._importBipedQc(generateRig=False)
+		bpy = self.bpy
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=self._qcAnimIndex(arm, "gesture")), {'FINISHED'})
+		item = arm.vs.qc_anims[self._qcAnimIndex(arm, "gesture")]
+		self.assertEqual(item.num_frames, 3)
+
+		# the corrective animation cancels the root's rotation; the offsets are added to the rest pose, rotating each bone
+		# in its own space
+		rest = self._poseLocals(_biped_rest)
+		expected = list(rest)
+		expected[0] = Matrix.Translation((0.5, 0, 0)) @ rest[0]
+		expected[1] = rest[1] @ Matrix.Rotation(0.4, 4, 'X')
+		self._assertPose(arm, self._expectedFromLocals(expected), "post delta on the rest pose")
+
+		# a pre delta rotates in the parent's space
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=self._qcAnimIndex(arm, "gesture_pre")), {'FINISHED'})
+		expected[1] = Matrix.Translation(rest[1].to_translation()) @ Matrix.Rotation(0.4, 4, 'X') @ rest[1].to_3x3().to_4x4()
+		self._assertPose(arm, self._expectedFromLocals(expected), "pre delta on the rest pose")
+
+	def test_QcImport_DeltaOnBase(self):
+		self._skipWithoutSlots()
+		from mathutils import Matrix
+		arm = self._importBipedQc(generateRig=False)
+		bpy = self.bpy
+		scene = bpy.context.scene
+		vs = arm.vs
+		index = self._qcAnimIndex(arm, "gesture")
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=index), {'FINISHED'})
+		handle = vs.qc_anims[index].slot_handle
+
+		# changing the base makes the loaded delta out of date; it is composed again when played
+		vs.qc_delta_base = "jump"
+		self.assertTrue(self.anim_list.is_stale(vs, vs.qc_anims[index]))
+		self.anim_list.refresh_active(bpy.context, arm)
+		item = vs.qc_anims[index]
+		self.assertNotEqual(item.slot_handle, handle)
+		self.assertEqual(item.baked_key, "base=jump")
+		for frame in (0, 1, 2):
+			scene.frame_set(frame)
+			expected = self._poseLocals(_biped_walk_frame(frame))
+			expected[0] = Matrix.Translation((0.5, 0, 0)) @ expected[0]
+			expected[1] = expected[1] @ Matrix.Rotation(0.4, 4, 'X')
+			self._assertPose(arm, self._expectedFromLocals(expected), "delta on jump, frame {}".format(frame))
+
+		# a base which can't be one falls back to the rest pose
+		vs.qc_delta_base = "gesture_pre"
+		self.assertEqual(self.anim_list.qc_compose.delta_base(vs, item), None)
+
+	def test_QcImport_BlendAndPoseParams(self):
+		self._skipWithoutSlots()
+		import math
+		arm = self._importBipedQc(generateRig=False)
+		bpy = self.bpy
+		vs = arm.vs
+		params = { p.name: p for p in vs.qc_pose_params }
+
+		# at the default value, the middle animation plays as it is
+		index = self._qcAnimIndex(arm, "lean")
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=index), {'FINISHED'})
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(thigh_y=math.pi / 2)), "lean at move_yaw 0")
+		handle = vs.qc_anims[index].slot_handle
+
+		# halfway between the middle and the right animations
+		params["move_yaw"].value = 45
+		self.assertTrue(self.anim_list.refresh_active(bpy.context, arm))
+		self.assertNotEqual(vs.qc_anims[index].slot_handle, handle)
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(thigh_y=math.pi / 2 + 0.2)), "lean at move_yaw 45")
+
+		# values are clamped to the pose parameter's range
+		params["move_yaw"].value = 1000
+		self.assertEqual(params["move_yaw"].value, 180)
+		self.anim_list.refresh_active(bpy.context, arm)
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(thigh_y=math.pi / 2 + 0.4)), "lean at the end of its range")
+
+		# a 2D blend
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=self._qcAnimIndex(arm, "aim")), {'FINISHED'})
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(pelvis=(5, 5, 40))), "aim at the centre")
+		params["aim_yaw"].value = 45
+		self.anim_list.refresh_active(bpy.context, arm)
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(pelvis=(10, 5, 40))), "aim right")
+
+		# the other sequences are refreshed when they are played
+		lean = vs.qc_anims[index]
+		params["move_yaw"].value = 0
+		self.assertTrue(self.anim_list.is_stale(vs, lean))
+		vs.qc_anims_active = index
+		self._assertPose(arm, self._expectedBipedPose(self._bipedPose(thigh_y=math.pi / 2)), "lean after changing move_yaw")
 
 	def test_Rig_Generated(self):
 		arm = self._importBipedQc()
@@ -610,7 +839,7 @@ class _AddonTests():
 
 		# snapping IK to an FK pose keeps the pose, frame after frame
 		leg = ("ValveBiped.Bip01_L_Thigh", "ValveBiped.Bip01_L_Calf", "ValveBiped.Bip01_L_Foot")
-		self.assertEqual(bpy.ops.smd.qc_anim_load(index=self._qcAnimIndex(arm, "walk")), {'FINISHED'})
+		self.assertEqual(bpy.ops.smd.qc_anim_load(index=self._qcAnimIndex(arm, "walk_all")), {'FINISHED'})
 		for frame in (5, 8, 2):
 			rig.reset_ik_fk(arm)
 			scene.frame_set(frame)

@@ -46,7 +46,7 @@ for collection in [bpy.app.handlers.depsgraph_update_post, bpy.app.handlers.load
 		if func.__module__.startswith(__name__):
 			collection.remove(func)
 
-from . import datamodel, import_smd, export_smd, flex, GUI, update, link_vmt, anim_list, rig
+from . import datamodel, import_smd, export_smd, flex, GUI, update, link_vmt, anim_list, qc_compose, rig
 from .utils import *
 
 def _load_dev_defaults():
@@ -161,20 +161,51 @@ class ExportableProps():
 	vertex_animations : CollectionProperty(name=get_id("vca_group_props"),type=ValveSource_VertexAnimation)
 	active_vertex_animation : IntProperty(default=-1)
 
-class ValveSource_QcAnimation(PropertyGroup):
-	"""An animation referenced by an imported QC. It is only imported on demand; see anim_list.py."""
+class ValveSource_QcComponent(PropertyGroup):
+	"""An animation file which a QC sequence plays. Blend sequences have several."""
 	name : StringProperty(name="Name")
 	filepath : StringProperty(name=get_id("qc_anim_file"), subtype='FILE_PATH')
+	fps : FloatProperty(name="FPS", default=30)
+	subtract_filepath : StringProperty(subtype='FILE_PATH', description="The pose which studiomdl subtracts from the animation to make a delta")
+	subtract_frame : IntProperty()
+	subtract_post : BoolProperty(default=True)
+
+class ValveSource_QcBlendParam(PropertyGroup):
+	"""A pose parameter which a blend sequence mixes its animations by, and the range they cover."""
+	name : StringProperty(name="Name")
+	start : FloatProperty()
+	end : FloatProperty()
+
+def _get_pose_param(self):
+	return self.get("value", min(max(0.0, self.min_value), self.max_value))
+def _set_pose_param(self, value):
+	self["value"] = min(max(value, self.min_value), self.max_value)
+
+class ValveSource_QcPoseParam(PropertyGroup):
+	"""A $poseparameter of an imported QC, which blend sequences are previewed at."""
+	name : StringProperty(name="Name")
+	min_value : FloatProperty()
+	max_value : FloatProperty()
+	value : FloatProperty(name=get_id("qc_pose_param_value"), get=_get_pose_param, set=_set_pose_param, update=anim_list.on_pose_param_changed)
+
+class ValveSource_QcAnimation(PropertyGroup):
+	"""A sequence of an imported QC. It is only imported on demand; see anim_list.py."""
+	name : StringProperty(name="Name")
 	source_qc : StringProperty(name=get_id("qc_anim_source"))
-	used_by : StringProperty(name=get_id("qc_anim_used_by"))
+	activity : StringProperty(name="Activity")
 	fps : FloatProperty(name="FPS", default=30)
 	is_delta : BoolProperty(name="Delta")
+	is_post : BoolProperty(name="Post")
 	is_hidden : BoolProperty(name="Hidden")
 	is_loop : BoolProperty(name="Loop")
-	is_helper : BoolProperty(name="Helper")
+	layers : StringProperty(name=get_id("qc_anim_layers"))
+	components : CollectionProperty(type=ValveSource_QcComponent)
+	blend_params : CollectionProperty(type=ValveSource_QcBlendParam)
+	blend_width : IntProperty(default=1, min=1)
 	num_frames : IntProperty(name="Frames")
 	action : PointerProperty(type=bpy.types.Action)
 	slot_handle : IntProperty(default=-1)
+	baked_key : StringProperty(description="The delta base and pose parameter values which the loaded animation was composed with")
 
 class ValveSource_ObjectProps(ExportableProps,PropertyGroup):
 	action_filter : StringProperty(name=get_id("slot_filter") if State.useActionSlots else get_id("action_filter"),description=get_id("slot_filter_tip") if State.useActionSlots else get_id("action_filter_tip"))
@@ -191,7 +222,9 @@ class ValveSource_ObjectProps(ExportableProps,PropertyGroup):
 	qc_missing_includes : StringProperty()
 	qc_anims_filter : StringProperty(name=get_id("qc_anims_filter"), description=get_id("qc_anims_filter_tip"), options={'TEXTEDIT_UPDATE'})
 	qc_anims_loaded_only : BoolProperty(name=get_id("qc_anims_loaded_only"), description=get_id("qc_anims_loaded_only_tip"))
-	qc_anims_show_helpers : BoolProperty(name=get_id("qc_anims_show_helpers"), description=get_id("qc_anims_show_helpers_tip"))
+	qc_anims_show_delta : BoolProperty(name=get_id("qc_anims_show_delta"), description=get_id("qc_anims_show_delta_tip"))
+	qc_pose_params : CollectionProperty(type=ValveSource_QcPoseParam)
+	qc_delta_base : StringProperty(name=get_id("qc_anim_delta_base"), description=get_id("qc_anim_delta_base_tip"), update=anim_list.on_delta_base_changed)
 
 class ValveSource_ArmatureProps(PropertyGroup):
 	implicit_zero_bone : BoolProperty(name=get_id("dummy_bone"),default=True,description=get_id("dummy_bone_tip"))
@@ -237,6 +270,9 @@ _classes = (
 	ValveSource_Exportable,
 	ValveSource_SceneProps,
 	ValveSource_VertexAnimation,
+	ValveSource_QcComponent,
+	ValveSource_QcBlendParam,
+	ValveSource_QcPoseParam,
 	ValveSource_QcAnimation,
 	ValveSource_ObjectProps,
 	ValveSource_ArmatureProps,

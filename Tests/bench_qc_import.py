@@ -8,7 +8,7 @@ Options:
                        $bodygroup/$lod blocks plus the first N $animation lines of --anim-qc.
     --anim-qc PATH     Animation QC to take the --subset animations from.
     --lazy 0|1         Value for the importer's lazyAnims property (ignored if the property doesn't exist).
-    --load-all         After importing, load every listed animation (lazy mode only).
+    --load-all         After importing, load every sequence the list shows, i.e. all but deltas (lazy mode only).
     --profile          Print the cProfile top 25 by cumulative time.
 """
 import os, sys, time, tempfile, argparse, cProfile, pstats
@@ -102,7 +102,7 @@ if args.load_all:
 		start = time.perf_counter()
 		if profiler: profiler.enable()
 		from io_scene_valvesource import anim_list
-		anim_list.load_items(bpy.context, arm, list(range(len(arm.vs.qc_anims))))
+		anim_list.load_items(bpy.context, arm, [i for i in anim_list.filtered_indices(arm.vs, loaded_only=False) if anim_list.can_load(arm.vs.qc_anims[i])])
 		if profiler: profiler.disable()
 		load_time = time.perf_counter() - start
 
@@ -124,14 +124,16 @@ def count_keys():
 	return keys, curves, slots
 
 keys, curves, slots = count_keys()
-listed = sum(len(ob.vs.qc_anims) for ob in bpy.data.objects if hasattr(ob.vs, "qc_anims"))
+sequences = [item for ob in bpy.data.objects if hasattr(ob.vs, "qc_anims") for item in ob.vs.qc_anims]
+deltas = sum(1 for item in sequences if item.is_delta)
 print("\n==== BENCH ====")
 print("qc          :", qc)
 print("result      :", result, kwargs)
 print("import time : {:.2f} s".format(import_time))
 if load_time is not None: print("load-all    : {:.2f} s".format(load_time))
 print("actions     :", len(bpy.data.actions), " slots:", slots, " fcurves:", curves, " keyframes:", keys)
-print("listed anims:", listed)
+print("sequences   : {} ({} playable, {} delta, {} hidden, {} blends)".format(len(sequences), len(sequences) - deltas, deltas,
+	sum(1 for item in sequences if item.is_hidden), sum(1 for item in sequences if len(item.components) > 1)))
 print("objects     :", len(bpy.data.objects), " meshes:", len(bpy.data.meshes))
 excluded = []
 def walk(lc):

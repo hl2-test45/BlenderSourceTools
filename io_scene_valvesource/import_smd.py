@@ -42,6 +42,13 @@ _qc_sequence_options = frozenset((
 	"lx", "ly", "lz", "lxr", "lyr", "lzr", "lm", "lq", "x", "y", "z", "xr", "yr", "zr",
 ))
 
+# The number of arguments of the options which are read, as (minimum, maximum). The words after any other option
+# are its arguments until the next option keyword.
+_qc_option_arity = {
+	"fps": (1, 1), "activity": (1, 2), "blend": (3, 3), "blendwidth": (1, 1), "subtract": (1, 2), "presubtract": (1, 2),
+	"addlayer": (1, 1), "blendlayer": (1, 6),
+}
+
 def _normaliseQcPath(path):
 	if (os.path.sep == '/'):
 		path = path.replace('\\','/')
@@ -66,45 +73,93 @@ class _QcSequenceBlock:
 		self.raw_name = raw_name
 		self.source_qc = source_qc
 		self.refs : list[tuple[str, str, str]] = [] # (word, raw word, current QC folder)
+		self.options : list[tuple[str, list[str], list[str]]] = [] # (option, arguments, raw arguments)
 		self.depth = 0
 		self.opened = False
 		self.awaiting_brace = False # header line without "{": the block may open on the next line
-		self.fps = None
-		self.activity = ""
-		self.is_delta = self.is_hidden = self.is_loop = False
 
 	def read(self, words : list[str], raw_words : list[str], cd : str, start = 0):
 		refs_allowed = self.keyword == "$sequence" # an $animation's only reference is the file after its name
-		previous = None
+		option = None # the option whose arguments are being read
 		for i in range(start, len(words)):
 			word = words[i]
 			if word == "{":
 				self.depth += 1
 				self.opened = True
 				self.awaiting_brace = False
+				option = None
 			elif word == "}":
 				self.depth -= 1
 				refs_allowed = False
+				option = None
 			elif self.depth > 1:
 				pass # nested block, e.g. "{ event 5004 0 "sound" }" or keyvalues
-			elif previous == "fps":
-				try: self.fps = float(word)
-				except ValueError: pass
-			elif previous == "activity":
-				self.activity = raw_words[i]
-			elif word.lower() in _qc_sequence_options:
-				refs_allowed = False
-				option = word.lower()
-				if option == "loop": self.is_loop = True
-				elif option in ("delta", "subtract", "predelta"): self.is_delta = True
-				elif option == "hidden": self.is_hidden = True
-			elif refs_allowed:
-				self.refs.append((word, raw_words[i], cd))
-			previous = word.lower() if self.depth <= 1 else None
+			else:
+				keyword = word.lower()
+				if option:
+					low, high = _qc_option_arity.get(option[0], (0, 1 << 16))
+					if len(option[1]) < low or (len(option[1]) < high and keyword not in _qc_sequence_options):
+						option[1].append(word)
+						option[2].append(raw_words[i])
+						continue
+				if keyword in _qc_sequence_options:
+					refs_allowed = False
+					option = (keyword, [], [])
+					self.options.append(option)
+				elif refs_allowed:
+					self.refs.append((word, raw_words[i], cd))
 
 	@property
 	def finished(self):
 		return self.depth <= 0 and self.opened
+
+	def has(self, option : str):
+		return any(o[0] == option for o in self.options)
+
+	def args(self, option : str) -> list[str]:
+		"""The raw arguments of the last occurrence of an option."""
+		return next((o[2] for o in reversed(self.options) if o[0] == option), [])
+
+	@property
+	def fps(self) -> float | None:
+		try:
+			return float(self.args("fps")[0])
+		except (IndexError, ValueError):
+			return None
+
+	@property
+	def is_delta(self):
+		return self.has("delta") or self.has("predelta")
+
+	@property
+	def subtract(self) -> tuple[str, int, bool] | None:
+		"""(animation, frame, post). "subtract" makes a delta which is applied after the base rotation, "presubtract" one applied before it."""
+		for option, _, args in reversed(self.options):
+			if option in ("subtract", "presubtract") and args:
+				try:
+					frame = int(float(args[1])) if len(args) > 1 else 0
+				except ValueError:
+					frame = 0
+				return (args[0], frame, option == "subtract")
+		return None
+
+	@property
+	def blend_params(self) -> list[tuple[str, float, float]]:
+		params = []
+		for option, _, args in self.options:
+			if option == "blend" and len(args) == 3:
+				try:
+					params.append((args[0], float(args[1]), float(args[2])))
+				except ValueError:
+					pass
+		return params
+
+	@property
+	def blend_width(self) -> int:
+		try:
+			return max(0, int(self.args("blendwidth")[0]))
+		except (IndexError, ValueError):
+			return 0
 
 class SmdImportCore(Logger):
 	"""The SMD/VTA/DMX/QC reading code, shared by the import operator and by AnimLoader."""
@@ -120,6 +175,7 @@ class SmdImportCore(Logger):
 	includeSearchPath = ""
 	lazyAnims = False
 	generateRig = False
+	capture_only = False # read animations into SmdInfo.captured instead of keying them
 
 	def ensureAnimationBonesValidated(self):
 		if self.smd.jobType == ANIM and self.append == 'APPEND' and (hasattr(self.smd,"a") or self.findArmature()):
@@ -475,7 +531,9 @@ class SmdImportCore(Logger):
 			if smd.jobType == ANIM:
 				ops.object.mode_set(mode='OBJECT') # the animation is keyed against the new rest pose, which edit mode hasn't written yet
 
-		if smd.jobType == ANIM:
+		if smd.jobType == ANIM and self.capture_only:
+			smd.captured = ({bone.name: kfs for bone, kfs in keyframes.items()}, num_frames)
+		elif smd.jobType == ANIM:
 			self._keyAnimation(keyframes, num_frames)
 		else:
 			# clear any unkeyed poses
@@ -527,8 +585,6 @@ class SmdImportCore(Logger):
 				bone.matrix_basis.identity() # bones which this animation doesn't key must not keep another animation's pose
 
 		legacy = arm.data.vs.legacy_rotation
-		legacy_mat = mat_BlenderToSMD
-		legacy_mat_inv = mat_BlenderToSMD.inverted()
 		upAxisMat = getUpAxisMat(smd.upAxis)
 		use_quat = smd.rotMode != 'XYZ'
 		rot_path = "rotation_quaternion" if use_quat else "rotation_euler"
@@ -564,11 +620,7 @@ class SmdImportCore(Logger):
 			data_bone = bone.bone
 			rest = data_bone.matrix_local
 			parent_rest = data_bone.parent.matrix_local if data_bone.parent else None
-			if parent_rest is not None:
-				parent_space = parent_rest @ legacy_mat if legacy else parent_rest
-			else:
-				parent_space = upAxisMat
-			right = legacy_mat_inv if legacy else None
+			parent_space, right = boneParentSpace(data_bone, legacy, upAxisMat)
 			default_flags = data_bone.use_inherit_rotation and data_bone.inherit_scale == 'FULL' and data_bone.use_local_location
 			left = rest.inverted() @ parent_space
 
@@ -1100,6 +1152,20 @@ class SmdImportCore(Logger):
 					in_bodygroup = False
 					continue
 
+			# pose parameters, which drive blend sequences
+			if line[0] == "$poseparameter" and len(line) > 3:
+				try:
+					qc.pose_params.setdefault(line[1].lower(), (raw_line[1], float(line[2]), float(line[3])))
+				except ValueError:
+					pass
+				continue
+
+			# a sequence which an $includemodel model defines, in its place in the sequence list
+			if line[0] == "$declaresequence" and len(line) > 1:
+				if doAnim:
+					qc.pending_sequences.append(_QcSequenceBlock(line[0], line[1], raw_line[1], source_qc))
+				continue
+
 			# skeletal animations: listed now, imported on demand (see anim_list.py)
 			if line[0] in ["$sequence","$animation"] and len(line) > 1:
 				sequence = _QcSequenceBlock(line[0], line[1], raw_line[1], source_qc)
@@ -1116,10 +1182,10 @@ class SmdImportCore(Logger):
 						sequence.awaiting_brace = True # the block may start on the next line
 				continue
 
-			# animations of other models, which this model can play
+			# animations of other models, which this model can play. Like the engine, read them after this model's own.
 			if line[0] == "$includemodel" and len(line) > 1:
 				if doAnim:
-					self._readIncludedModel(raw_line[1], filedir, doAnim, makeCamera, rotMode)
+					qc.pending_includemodels.append((raw_line[1], filedir))
 				continue
 
 			# flex animation
@@ -1206,6 +1272,7 @@ class SmdImportCore(Logger):
 
 		if outer_qc:
 			self._resolveQcSequences()
+			self._readQueuedIncludes(doAnim, makeCamera, rotMode)
 			self._finishQcAnimations(filepath, doAnim, rotMode)
 			printTimeMessage(qc.startTime,filename,"import","QC")
 		return self.num_files_imported
@@ -1258,59 +1325,101 @@ class SmdImportCore(Logger):
 			return
 		qc = self.qc
 		if sequence.keyword == "$animation":
-			record = None
+			anim = None
 			if sequence.refs:
 				_, raw_ref, cd = sequence.refs[0]
-				record = self._qcAnimRecordForFile(raw_ref, cd, sequence.source_qc)
-			qc.anim_scope[sequence.name.lower()] = record # even if the file is missing, so that sequences don't take the name for a path
-			if record:
-				if sequence.raw_name != record.name:
-					record.add_user(sequence.raw_name)
-				self._applySequenceOptions(record, sequence)
+				anim = self._qcAnimDef(sequence.raw_name, raw_ref, cd, sequence)
+			qc.anim_scope[sequence.name.lower()] = anim # even if the file is missing, so that sequences don't take the name for a path
 		else:
 			qc.pending_sequences.append(sequence)
 
-	def _resolveQcSequences(self):
-		"""Links the $sequences of the model being read to the files they play."""
-		qc = self.qc
-		for sequence in qc.pending_sequences:
-			single = len(sequence.refs) == 1
-			for word, raw_ref, cd in sequence.refs:
-				key = word.lower()
-				if key in qc.anim_scope:
-					record = qc.anim_scope[key]
-					direct_file = False
-				else:
-					record = self._qcAnimRecordForFile(raw_ref, cd, sequence.source_qc)
-					direct_file = True
-				if record:
-					record.add_user(sequence.raw_name)
-					if direct_file and single:
-						self._applySequenceOptions(record, sequence)
-		qc.pending_sequences = []
+	def _qcAnimDef(self, name : str, ref : str, cd : str, block : '_QcSequenceBlock') -> QcAnimDef | None:
+		path = self._resolveAnimFile(ref, cd)
+		if not path:
+			return None
+		subtract = block.subtract
+		return QcAnimDef(name, path, cd, fps=block.fps, is_loop=block.has("loop"), is_delta=block.is_delta or subtract is not None, subtract=subtract)
 
-	@staticmethod
-	def _applySequenceOptions(record : QcAnimRecord, sequence : '_QcSequenceBlock'):
-		if sequence.fps:
-			record.fps = sequence.fps
-		record.is_loop |= sequence.is_loop
-		record.is_delta |= sequence.is_delta
-		record.is_hidden |= sequence.is_hidden
-
-	def _qcAnimRecordForFile(self, ref : str, cd : str, source_qc : str) -> QcAnimRecord | None:
+	def _resolveAnimFile(self, ref : str, cd : str) -> str | None:
 		qc = self.qc
 		relative = _normaliseQcPath(ref)
-		path = os.path.join(cd, appendExt(relative, "smd"))
-		if not os.path.exists(path):
-			path = os.path.join(cd, appendExt(relative, "dmx"))
-			if not os.path.exists(path):
-				qc.missing_anim_files.append(os.path.join(cd, relative))
+		for ext in ("smd", "dmx"):
+			path = os.path.join(cd, appendExt(relative, ext))
+			if os.path.exists(path):
+				return os.path.normpath(path)
+		missing = os.path.join(cd, relative)
+		if missing not in qc.missing_anim_files:
+			qc.missing_anim_files.append(missing)
+		return None
+
+	def _resolveQcSequences(self):
+		"""Adds the $sequences of the model being read to the sequence list, unless a model read before defined the same name."""
+		qc = self.qc
+		for block in qc.pending_sequences:
+			key = block.name.lower()
+			if block.keyword == "$declaresequence":
+				if key not in qc.sequences:
+					qc.sequences[key] = QcSequenceRecord(block.raw_name, block.source_qc, placeholder=True)
+				continue
+			existing = qc.sequences.get(key)
+			if existing and not existing.placeholder:
+				continue # the engine keeps the first sequence of a name
+			record = self._qcSequenceRecord(block)
+			if record:
+				qc.sequences[key] = record # a placeholder keeps its place in the list
+			else:
+				qc.num_dropped += 1
+		qc.pending_sequences = []
+
+	def _qcSequenceRecord(self, block : '_QcSequenceBlock') -> QcSequenceRecord | None:
+		"""Resolves the animations which a $sequence plays: $animations of the model, or files which take the sequence's options."""
+		qc = self.qc
+		record = QcSequenceRecord(block.raw_name, block.source_qc)
+		post_subtract = False
+		for word, raw_ref, cd in block.refs:
+			key = word.lower()
+			if key in qc.anim_scope:
+				anim = qc.anim_scope[key]
+			else:
+				anim = self._qcAnimDef(os.path.splitext(os.path.basename(_normaliseQcPath(raw_ref)))[0], raw_ref, cd, block)
+			if not anim:
+				print("- Sequence \"{}\" not listed: \"{}\" was not found".format(block.raw_name, raw_ref))
 				return None
-		key = _qcFileKey(path)
-		record = qc.anim_records.get(key)
-		if record is None:
-			path = os.path.normpath(path)
-			record = qc.anim_records[key] = QcAnimRecord(os.path.splitext(os.path.basename(path))[0], path, source_qc)
+
+			component = QcComponent(anim.name, anim.filepath, anim.fps or block.fps or 30.0)
+			if anim.subtract:
+				ref, component.subtract_frame, component.subtract_post = anim.subtract
+				post_subtract |= component.subtract_post
+				if ref.lower() in qc.anim_scope:
+					base = qc.anim_scope[ref.lower()]
+					component.subtract_filepath = base.filepath if base else ""
+				else:
+					component.subtract_filepath = self._resolveAnimFile(ref, anim.cd) or ""
+			record.components.append(component)
+			record.is_loop |= anim.is_loop
+			record.is_delta |= anim.is_delta
+		if not record.components:
+			return None
+
+		record.fps = record.components[0].fps
+		record.is_loop |= block.has("loop")
+		record.is_delta |= block.is_delta
+		record.is_post = block.has("post") or block.has("delta") or (post_subtract and not block.has("predelta"))
+		record.is_hidden = block.has("hidden")
+		activity = block.args("activity")
+		record.activity = activity[0] if activity else ""
+		record.layers = [args[0] for option, _, args in block.options if option in ("addlayer", "blendlayer") and args]
+
+		count = len(record.components)
+		if count > 1:
+			from .qc_compose import blend_grid
+			params = block.blend_params
+			width, height = blend_grid(count, block.blend_width, len(params))
+			if width * height != count:
+				print("- Sequence \"{}\": {} animations don't fill a blend grid; blending them in a row".format(block.raw_name, count))
+				width, height = count, 1
+			record.blend_width = width
+			record.blend_params = params[:1] if height == 1 else params[:2]
 		return record
 
 	def _resolveIncludedModel(self, mdl_path : str, qc_dir : str) -> str | None:
@@ -1349,7 +1458,7 @@ class SmdImportCore(Logger):
 		print("- $includemodel \"{}\": reading {}".format(mdl_path, path))
 
 		# an included model is a separate compile, with its own folder, variables and animation names
-		saved = (qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences)
+		saved = (qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences, qc.pending_includemodels)
 		qc.root_filedir = os.path.dirname(path)
 		qc.dir_stack = []
 		qc.vars = {}
@@ -1357,40 +1466,58 @@ class SmdImportCore(Logger):
 		qc.harvest_only = True
 		qc.anim_scope = {}
 		qc.pending_sequences = []
+		qc.pending_includemodels = []
 		qc.include_depth += 1
 		try:
 			self.readQC(path, False, doAnim, makeCamera, rotMode)
 			self._resolveQcSequences()
+			self._readQueuedIncludes(doAnim, makeCamera, rotMode) # depth first, like the engine
 		except IOError:
 			self.warning(get_id("importer_err_qci", True).format(path))
 		finally:
 			qc.include_depth -= 1
-			(qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences) = saved
+			(qc.root_filedir, qc.dir_stack, qc.vars, qc.in_block_comment, qc.harvest_only, qc.anim_scope, qc.pending_sequences, qc.pending_includemodels) = saved
+
+	def _readQueuedIncludes(self, doAnim, makeCamera, rotMode):
+		"""Reads the $includemodel models of the model which has just been read, in order."""
+		qc = self.qc
+		queue, qc.pending_includemodels = qc.pending_includemodels, []
+		for mdl_path, qc_dir in queue:
+			self._readIncludedModel(mdl_path, qc_dir, doAnim, makeCamera, rotMode)
 
 	def _finishQcAnimations(self, filepath, doAnim, rotMode):
-		"""Lists the QC's animations on its armature, and builds the rig."""
+		"""Lists the QC's sequences on its armature, and builds the rig."""
 		qc = self.qc
 		for include in qc.unresolved_includes:
 			self.warning(get_id("importer_qc_includemodel_missing", True).format(include))
 		if qc.missing_anim_files:
-			self.warning(get_id("importer_qc_anims_missing", True).format(len(qc.missing_anim_files)))
+			self.warning(get_id("importer_qc_anims_missing", True).format(len(qc.missing_anim_files), qc.num_dropped))
 			for path in qc.missing_anim_files:
 				print("  - missing:", path)
 
-		records = list(qc.anim_records.values()) if doAnim else []
+		records = [record for record in qc.sequences.values() if not record.placeholder] if doAnim else []
+		undefined = [record.name for record in qc.sequences.values() if record.placeholder]
+		if doAnim and undefined:
+			print("- {} $declaresequence names are not defined by any included model: {}".format(len(undefined), ", ".join(undefined)))
 		if records and not qc.a:
 			qc.a = self.findArmature()
 
 		loaded = {}
 		if records and not qc.a and not qc.harvest_only:
-			# an animation-only QC: the first animation provides the skeleton
-			first = records[0]
+			# an animation-only QC: the first sequence which plays a plain animation provides the skeleton
+			first = next((r for r in records if r.is_simple()), None) or next((r for r in records if not r.is_delta), None)
+			path = first.components[0].filepath if first else None
 			self.append = 'NEW_ARMATURE'
-			if (self.readDMX if first.filepath.lower().endswith(".dmx") else self.readSMD)(first.filepath, qc.upAxis, rotMode, False, ANIM):
+			if path and (self.readDMX if path.lower().endswith(".dmx") else self.readSMD)(path, qc.upAxis, rotMode, False, ANIM):
 				self.num_files_imported += 1
 				qc.a = qc.a or self.smd.a
 				slot = self.smd.created_slot
-				loaded[first.filepath] = (self.smd.created_action, slot.handle if slot else -1, self.smd.num_frames)
+				if first.is_simple():
+					loaded[first.name.lower()] = (self.smd.created_action, slot.handle if slot else -1, self.smd.num_frames)
+				elif slot:
+					self.smd.created_action.slots.remove(slot) # a blend, which is composed when it is loaded
+				elif self.smd.created_action:
+					bpy.data.actions.remove(self.smd.created_action)
 
 		arm = qc.a
 		if not arm or arm.type != 'ARMATURE':
@@ -1401,11 +1528,13 @@ class SmdImportCore(Logger):
 		arm.data.vs.rig_hints = json.dumps(qc.rig_hints)
 		if records or qc.unresolved_includes:
 			anim_list.store_records(arm, records, loaded, qc_path=os.path.realpath(filepath), rot_mode=rotMode, up_axis=qc.upAxis,
-						   search_path=self.includeSearchPath, unresolved_includes=qc.unresolved_includes)
-			print("- Listed {} animations on \"{}\"".format(len(records), arm.name))
+						   search_path=self.includeSearchPath, unresolved_includes=qc.unresolved_includes, pose_params=qc.pose_params)
+			print("- Listed {} sequences on \"{}\"".format(len(records), arm.name))
 			self.num_anims_listed = getattr(self, "num_anims_listed", 0) + len(records)
 			if records and not self.lazyAnims and not qc.harvest_only:
-				anim_list.load_items(bpy.context, arm, [i for i, item in enumerate(arm.vs.qc_anims) if not anim_list.is_loaded(item)], logger=self)
+				vs = arm.vs
+				anim_list.load_items(bpy.context, arm, [i for i in anim_list.filtered_indices(vs, loaded_only=False)
+					if anim_list.can_load(vs.qc_anims[i]) and not anim_list.is_loaded(vs.qc_anims[i])], logger=self)
 
 		if self.generateRig and not qc.harvest_only:
 			from . import rig
@@ -2121,3 +2250,41 @@ class AnimLoader(SmdImportCore):
 			self.num_files_imported += 1
 			return self.smd
 		return None
+
+	def capture(self, filepath : str) -> tuple[dict[str, list[KeyFrame]], int] | None:
+		"""Reads an animation without keying it. Returns its keyframes by bone name, and its frame count."""
+		self.append = 'VALIDATE'
+		self.capture_only = True
+		read = self.readDMX if filepath.lower().endswith(".dmx") else self.readSMD
+		try:
+			imported = read(filepath, self.upAxis, self.rotMode, False, ANIM)
+		except Exception as err:
+			self.error(get_id("importer_err_smd", True).format(os.path.basename(filepath), err))
+			return None
+		finally:
+			self.capture_only = False
+		return self.smd.captured if imported else None
+
+	def key_frames(self, name : str, frames : dict[str, list[Matrix]], num_frames : int) -> SmdInfo:
+		"""Keys bone-local matrices, in the space of the keyframes which capture() returns, into a new animation."""
+		arm = self.target_armature
+		assert(arm)
+		smd = self.smd = SmdInfo(name)
+		smd.jobType = ANIM
+		smd.a = arm
+		smd.upAxis = self.upAxis
+		smd.rotMode = self.rotMode
+		keyframes = {}
+		for bone_name, matrices in frames.items():
+			bone = arm.pose.bones.get(bone_name)
+			if not bone:
+				continue
+			bone_keyframes = keyframes[bone] = []
+			for frame, matrix in enumerate(matrices):
+				keyframe = KeyFrame()
+				keyframe.frame = frame
+				keyframe.matrix = matrix
+				keyframe.pos = keyframe.rot = True
+				bone_keyframes.append(keyframe)
+		self._keyAnimation(keyframes, num_frames)
+		return smd

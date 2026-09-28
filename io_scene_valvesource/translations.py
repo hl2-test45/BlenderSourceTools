@@ -891,10 +891,10 @@ _data = {
 	'en': "Linked textures to {0} materials, {1} already textured",
 },
 'importer_lazyanims': {
-	'en': "List Animations Only",
+	'en': "List Sequences Only",
 },
 'importer_lazyanims_tip': {
-	'en': "List a QC's animations on its armature and import each one when it is selected in the Source sidebar tab, instead of importing all of them now",
+	'en': "List a QC's sequences on its armature and import each one when it is selected in the Source sidebar tab, instead of importing all of them now",
 },
 'importer_includemodel_path': {
 	'en': "$includemodel Folder",
@@ -909,7 +909,7 @@ _data = {
 	'en': "Add IK controls to the arms and legs of characters, found from the QC's $ikchain and $hbox entries or from bone names",
 },
 'importer_complete_anims': {
-	'en': "Imported {0} files and listed {1} animations in {2} seconds",
+	'en': "Imported {0} files and listed {1} sequences in {2} seconds",
 },
 'importer_qc_lods': {
 	'en': "{0} LODs",
@@ -918,19 +918,19 @@ _data = {
 	'en': "{0} Physics",
 },
 'importer_qc_includemodel_missing': {
-	'en': "$includemodel \"{0}\": no decompiled QC found. Its animations were not listed",
+	'en': "$includemodel \"{0}\": no decompiled QC found. Its sequences were not listed",
 },
 'importer_qc_includemodel_depth': {
 	'en': "$includemodel \"{0}\": too many nested models, skipped",
 },
 'importer_qc_anims_missing': {
-	'en': "{0} animation files referenced by the QC were not found (listed in the console)",
+	'en': "{0} animation files referenced by the QC were not found, and {1} sequences which play them were not listed (see the console)",
 },
 'qc_anims_title': {
-	'en': "QC Animations",
+	'en': "QC Sequences",
 },
 'qc_anims_count': {
-	'en': "{0} animations, {1} loaded",
+	'en': "{0} playable / {1} sequences, {2} loaded",
 },
 'qc_anims_qc_path': {
 	'en': "QC",
@@ -939,22 +939,22 @@ _data = {
 	'en': "Filter",
 },
 'qc_anims_filter_tip': {
-	'en': "Show animations whose name, or the name of a sequence which plays them, contains this text",
+	'en': "Show sequences whose name, activity or animations contain this text",
 },
 'qc_anims_loaded_only': {
 	'en': "Loaded Only",
 },
 'qc_anims_loaded_only_tip': {
-	'en': "Only show animations which have been imported",
+	'en': "Only show sequences which have been imported",
 },
-'qc_anims_show_helpers': {
-	'en': "Show Helpers",
+'qc_anims_show_delta': {
+	'en': "Show Delta Sequences",
 },
-'qc_anims_show_helpers_tip': {
-	'en': "Show the \"@...\" corrective animations which Crowbar writes for delta sequences",
+'qc_anims_show_delta_tip': {
+	'en': "Show the delta sequences (gestures, aim layers...), which the engine layers on another animation. They are previewed on the rest pose or on a chosen base sequence",
 },
-'qc_anims_used_by': {
-	'en': "Sequences: {0}",
+'qc_anims_legacy': {
+	'en': "This list was made by an older version. Rescan the QC to list its sequences",
 },
 'qc_anims_missing_include': {
 	'en': "Not found: {0}",
@@ -965,14 +965,41 @@ _data = {
 'qc_anim_source': {
 	'en': "Source QC",
 },
-'qc_anim_used_by': {
-	'en': "Sequences",
+'qc_anim_layers': {
+	'en': "Layers",
+},
+'qc_anim_layers_info': {
+	'en': "Engine layers: {0}",
+},
+'qc_anim_blend_info': {
+	'en': "Blend {0}×{1}: {2}",
+},
+'qc_anim_delta_base': {
+	'en': "Delta Base",
+},
+'qc_anim_delta_base_tip': {
+	'en': "The sequence which delta sequences are previewed on. Leave empty for the rest pose",
+},
+'qc_anim_rest_pose': {
+	'en': "Previewed on the rest pose",
+},
+'qc_anim_base_invalid': {
+	'en': "\"{0}\" is not a listed sequence which can be a base; using the rest pose",
+},
+'qc_anim_needs_slots': {
+	'en': "Delta and blend sequences can only be previewed in Blender 4.4 or later",
+},
+'qc_pose_params': {
+	'en': "Pose Parameters",
+},
+'qc_pose_param_value': {
+	'en': "Value",
 },
 'qc_anim_load': {
-	'en': "Load Animation",
+	'en': "Load Sequence",
 },
 'qc_anim_load_tip': {
-	'en': "Import this animation and play it",
+	'en': "Import this sequence and play it",
 },
 'qc_anim_load_failed': {
 	'en': "Could not import {0}",
@@ -981,31 +1008,31 @@ _data = {
 	'en': "Load Shown",
 },
 'qc_anim_load_filtered_tip': {
-	'en': "Import every animation shown by the list's filter. Press Esc to stop",
+	'en': "Import every sequence shown by the list's filter. Press Esc to stop",
 },
 'qc_anim_loaded_count': {
-	'en': "Imported {0} animations in {1} seconds",
+	'en': "Imported {0} sequences in {1} seconds",
 },
 'qc_anim_nothing_to_load': {
-	'en': "All shown animations are already loaded",
+	'en': "All shown sequences are already loaded",
 },
 'qc_anim_loading': {
-	'en': "Importing animations: {0}/{1} (Esc to stop)",
+	'en': "Importing sequences: {0}/{1} (Esc to stop)",
 },
 'qc_anim_unload': {
-	'en': "Unload Animation",
+	'en': "Unload Sequence",
 },
 'qc_anim_unload_tip': {
-	'en': "Delete this animation's keyframes. It stays in the list and can be imported again",
+	'en': "Delete this sequence's keyframes. It stays in the list and can be imported again",
 },
 'qc_anims_rescan': {
 	'en': "Rescan QC",
 },
 'qc_anims_rescan_tip': {
-	'en': "Read the armature's QC again, and its $includemodel QCs, to list animations which were not found before",
+	'en': "Read the armature's QC again, and its $includemodel QCs, to list sequences which were not found before",
 },
 'qc_anims_rescanned': {
-	'en': "{0} new animations, {1} in total",
+	'en': "{0} new sequences, {1} in total",
 },
 'rig_title': {
 	'en': "IK Rig",

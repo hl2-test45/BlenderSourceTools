@@ -445,6 +445,16 @@ def getUpAxisMat(axis):
 	else:
 		raise AttributeError("getUpAxisMat got invalid axis argument '{}'".format(axis))
 
+def boneParentSpace(data_bone : bpy.types.Bone, legacy : bool, upAxisMat : Matrix) -> tuple[Matrix, Matrix | None]:
+	"""The spaces which an imported keyframe matrix M of the bone sits between: its pose basis is
+	rest⁻¹ @ parent_space @ M (@ right, if right is not None)."""
+	parent_rest = data_bone.parent.matrix_local if data_bone.parent else None
+	if parent_rest is not None:
+		parent_space = parent_rest @ mat_BlenderToSMD if legacy else parent_rest
+	else:
+		parent_space = upAxisMat
+	return parent_space, (mat_BlenderToSMD.inverted() if legacy else None)
+
 def MakeObjectIcon(object,prefix=None,suffix=None):
 	if not (prefix or suffix):
 		raise TypeError("A prefix or suffix is required")
@@ -771,7 +781,8 @@ class SmdInfo:
 	created_action : bpy.types.Action | None = None
 	created_slot = None # bpy.types.ActionSlot, Blender 4.4+
 	num_frames = 0
-	
+	captured = None # (keyframes by bone name, frame count) when an animation is read without being keyed
+
 	def __init__(self, jobName : str):
 		self.jobName = jobName
 		self.upAxis = bpy.context.scene.vs.up_axis
@@ -813,13 +824,18 @@ class QcInfo:
 		self.vars = {}
 		self.dir_stack = []
 
-		# Animations found in the QC and its $include/$includemodel files, keyed by normalised path
-		self.anim_records : dict[str, QcAnimRecord] = {}
+		# Sequences of the QC and of the models it $includemodels, keyed by lowercase name. Like the engine, the model's
+		# own sequences come first, then those of each included model in turn; the first definition of a name wins,
+		# except that a $declaresequence placeholder is replaced by the real sequence.
+		self.sequences : dict[str, QcSequenceRecord] = {}
+		self.pose_params : dict[str, tuple[str, float, float]] = {} # lowercase name: (name, min, max)
 		self.missing_anim_files = []
+		self.num_dropped = 0 # sequences with missing files
 		# $animation names are visible to the $sequences of the model which defines them, which includes its $include files
 		# but not its $includemodel files. Sequences are resolved once the model has been read, as they can refer ahead.
-		self.anim_scope : dict[str, QcAnimRecord | None] = {}
+		self.anim_scope : dict[str, QcAnimDef | None] = {}
 		self.pending_sequences = []
+		self.pending_includemodels : list[tuple[str, str]] = [] # (model path, QC folder), read once the model is done
 		self.outer_filedir = ""
 		self.visited_qcs = set()
 		self.unresolved_includes = []
@@ -835,21 +851,47 @@ class QcInfo:
 	def cd(self):
 		return os.path.join(self.root_filedir,*self.dir_stack)
 
-class QcAnimRecord:
-	"""An animation file referenced by a $sequence or $animation. It is listed on the armature
-	and only imported when the user asks for it."""
-	def __init__(self, name : str, filepath : str, source_qc : str):
-		self.name = name
-		self.filepath = filepath
-		self.source_qc = source_qc
-		self.used_by : list[str] = [] # sequence names
-		self.fps = 30.0
-		self.is_delta = self.is_hidden = self.is_loop = False
-		self.is_helper = name.startswith("@") # Crowbar writes "@..._corrective_animation" helpers for delta sequences
+@dataclasses.dataclass
+class QcAnimDef:
+	"""A $animation, or a file which a $sequence plays directly."""
+	name : str
+	filepath : str
+	cd : str # the QC folder its references are relative to
+	fps : float | None = None
+	is_loop : bool = False
+	is_delta : bool = False
+	subtract : tuple[str, int, bool] | None = None # (animation, frame, post)
 
-	def add_user(self, sequence_name : str):
-		if sequence_name and sequence_name not in self.used_by:
-			self.used_by.append(sequence_name)
+@dataclasses.dataclass
+class QcComponent:
+	"""An animation file which a sequence plays. Blend sequences have several."""
+	name : str
+	filepath : str
+	fps : float = 30.0
+	subtract_filepath : str = "" # the pose which studiomdl subtracts from it to make a delta
+	subtract_frame : int = 0
+	subtract_post : bool = True
+
+@dataclasses.dataclass
+class QcSequenceRecord:
+	"""A $sequence of an imported QC. It is listed on the armature and only imported when the user asks for it."""
+	name : str
+	source_qc : str
+	placeholder : bool = False # $declaresequence
+	components : list[QcComponent] = dataclasses.field(default_factory=list)
+	blend_params : list[tuple[str, float, float]] = dataclasses.field(default_factory=list) # (pose parameter, start, end)
+	blend_width : int = 1 # components per row of the blend grid; the first parameter varies along rows
+	fps : float = 30.0
+	is_delta : bool = False
+	is_post : bool = False # a delta applied after the base rotation, in the bone's own space
+	is_hidden : bool = False
+	is_loop : bool = False
+	activity : str = ""
+	layers : list[str] = dataclasses.field(default_factory=list) # sequences which the engine plays on top
+
+	def is_simple(self):
+		"""Plays one file as it is, which can be imported directly."""
+		return len(self.components) == 1 and not self.is_delta and not self.components[0].subtract_filepath
 		
 class KeyFrame:
 	def __init__(self):

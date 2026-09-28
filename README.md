@@ -114,11 +114,13 @@ Materials that already have an Image Texture node are left alone unless **Overwr
 Importing a QC such as a decompiled `police.qc` brings in only what you need to work on the model:
 
 - **LODs and physics** (`$lod`, `$shadowlod`, `$collisionmodel`/`$collisionjoints`) are imported into `<model> LODs` and `<model> Physics` collections, which are excluded from the view layer. Tick them in the Outliner to see them or to export them. Each LOD collection records its `$lod` distance in the `lod_threshold` custom property.
-- **Animations are listed, not imported.** The `$sequence`/`$animation` files of the QC, and of the models it names with `$includemodel`, appear in **3D View > Sidebar > Source > QC Animations**. Click the import icon of an animation to load it, which also plays it: it becomes a slot of the armature's action, and the scene's frame range and frame rate follow it. **Load Shown** imports everything the filter shows (Esc stops it). The filter also matches sequence names, so searching `walk_all` finds the `a_Walk*` animations it blends.
+- **Sequences are listed, not imported.** The `$sequence`s of the QC, and of the models it names with `$includemodel`, appear in **3D View > Sidebar > Source > QC Sequences**, merged the way the engine does it: the model's own sequences first, then each included model's in turn, the first sequence of a name winning, and `$declaresequence` placeholders taking the real sequence. For the decompiled police model that is 732 sequences, the same number HLMV shows. Click the import icon of a sequence to load it, which also plays it: it becomes a slot of the armature's action, and the scene's frame range and frame rate follow it. **Load Shown** imports everything the filter shows (Esc stops it). The filter also matches activities and the animations a sequence plays, so searching `a_PoliceWalkN` finds `walk_all`.
+- **Delta sequences** (gestures, aim layers, weapon switches: 107 of police's 732) only store offsets, so imported on their own they collapse the skeleton. They are hidden until the delta toggle next to the filter is on, and are previewed the way the engine plays them: layered on the rest pose, or on the sequence picked as **Delta Base** (e.g. an idle). Crowbar's `subtract` corrective animations are applied, and never listed.
+- **Blend sequences** (`walk_all`, aim matrices...) mix several animations by pose parameters. Selecting one shows the `$poseparameter` sliders it uses and the animations it is mixing; moving a slider recomposes the sequence at that value, like moving the pose parameter in HLMV. Delta and blend sequences need Blender 4.4 or later; recomposing replaces the sequence's slot, so key your edits in a copy.
 - **`$includemodel`** names a compiled `.mdl`. The importer looks for a decompiled QC with the same name next to the QC (or in `<name>/<name>.qc`), then in the **$includemodel Folder** chosen in the import options. If one isn't found, the panel says so; pick the folder and click **Rescan QC**.
 - **IK rig.** Characters get IK controls for their arms and legs. The limbs come from the QC's `$ikchain` lines, falling back to its `$hbox` hit groups and then to ValveBiped bone names. The deforming skeleton isn't changed. Each limb has an **IK/FK** slider in the **IK Rig** panel: 0 plays the imported keyframes, 1 follows the `<limb>_ik` and `<limb>_pole` controls. **Snap IK to FK** moves the controls onto the current pose, **Snap FK to IK** does the reverse, and **Bake Animation to IK** keys the controls on every frame so an imported animation can be edited with IK. The rig's bones are never exported, and exported animations contain the IK result.
 
-To import everything up front as before, untick **List Animations Only** in the import options. Imports are also much faster than they were: loading all 1,391 police animations takes about 17 seconds, where 964 of them used to take over two minutes.
+To import every sequence but the deltas up front, untick **List Sequences Only** in the import options. Loading all 625 playable police sequences, blends included, takes about 11 seconds.
 
 ## Repository layout
 
@@ -133,7 +135,8 @@ io_scene_valvesource/   the add-on itself (this folder is what gets zipped/insta
   update.py                built-in "check for update" operator (see note below)
   utils.py                 shared helpers
   link_vmt.py              "Link VMT Textures": assigns VMT/$basetexture images to imported materials
-  anim_list.py             the QC animation list: on-demand animation import, "Source" sidebar panel
+  anim_list.py             the QC sequence list: on-demand sequence import, "Source" sidebar panel
+  qc_compose.py            composes delta and blend sequences: subtract, pose parameter blending, layering on a base
   rig.py                   IK rig generation and IK/FK snapping
 Tests/                   unit tests, run against Blender-as-a-Python-module
   run_in_blender.py        runs the tests inside an installed Blender instead
